@@ -69,6 +69,7 @@ class AuthController extends ResourceController
     public function update($email = null)
     {
         if (!$email) return $this->fail('Email requerido.', 400);
+        $email = strtolower(trim(urldecode($email)));
         $email = urldecode($email);
 
         $rules = [
@@ -96,6 +97,7 @@ class AuthController extends ResourceController
     public function delete($email = null)
     {
         if (!$email) return $this->fail('Email requerido.', 400);
+        $email = strtolower(trim(urldecode($email)));
         $email = urldecode($email);
 
         try {
@@ -111,6 +113,7 @@ class AuthController extends ResourceController
     public function setRole($email = null)
     {
         if (!$email) return $this->fail('Email requerido en la URL', 400);
+        $email = strtolower(trim(urldecode($email)));
         
         $email = urldecode($email);
         $roleId = $this->request->getJSON()->role_id ?? null;
@@ -124,6 +127,58 @@ class AuthController extends ResourceController
             return $this->failNotFound($e->getMessage());
         } catch (Exception $e) {
             return $this->failServerError($e->getMessage());
+        }
+    }
+
+    public function forgotPassword()
+    {
+        $rules = ['email' => 'required|valid_email'];
+        if (!$this->validate($rules)) return $this->failValidationErrors($this->validator->getErrors());
+
+        $email = strtolower(trim($this->request->getJSON()->email ?? ''));
+
+        try {
+            $this->authService->forgotPassword($email);
+            // Siempre respondemos OK por seguridad, exista o no el correo
+            return $this->respond(['status' => 200, 'message' => 'Si el correo existe, se ha enviado un enlace de recuperación.']);
+        } catch (Exception $e) {
+            return $this->failServerError('Error procesando la solicitud.');
+        }
+    }
+
+    public function index()
+    {
+        try {
+            $users = $this->authService->getAllUsers(); 
+
+            return $this->respond([
+                'status' => 200, 
+                'message' => 'Usuarios obtenidos correctamente', 
+                'data' => $users
+            ]);
+
+        } catch (Exception $e) {
+            return $this->failServerError('Error al obtener usuarios: ' . $e->getMessage());
+        }
+    }
+
+    public function resetPassword()
+    {
+        $rules = [
+            'token'    => 'required',
+            'password' => 'required|min_length[8]'
+        ];
+        if (!$this->validate($rules)) return $this->failValidationErrors($this->validator->getErrors());
+
+        $json = $this->request->getJSON();
+
+        try {
+            $this->authService->resetPassword($json->token, $json->password);
+            return $this->respond(['status' => 200, 'message' => 'Contraseña actualizada correctamente. Ya puedes iniciar sesión.']);
+        } catch (InvalidArgumentException $e) {
+            return $this->fail($e->getMessage(), 400);
+        } catch (Exception $e) {
+            return $this->failServerError('Error al restablecer la contraseña.');
         }
     }
 }

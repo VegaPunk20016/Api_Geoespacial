@@ -40,9 +40,9 @@ class Autoload extends AutoloadConfig
     public $psr4 = [
         APP_NAMESPACE => APPPATH,
         'Config'      => APPPATH . 'Config',
+        'Modules'     => ROOTPATH . 'Modules',
         'Modules\Users' => ROOTPATH . 'Modules/Users',
-        'Modules\Denue' => ROOTPATH . 'Modules/Denue',
-        'Modules\Ine'   => ROOTPATH . 'Modules/Ine',
+        'Modules\Padrones' => ROOTPATH . 'Modules/Padrones',
     ];
 
     /**

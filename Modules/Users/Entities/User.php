@@ -12,6 +12,8 @@ class User extends Entity
         'username'   => null,
         'email'      => null,
         'password'   => null,
+        'reset_token'      => null, 
+        'reset_expires_at' => null,
         'created_at' => null,
         'updated_at' => null,
         'deleted_at' => null,

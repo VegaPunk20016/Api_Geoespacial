@@ -33,7 +33,7 @@ class SecuritySeeder extends Seeder
             // Admin
             ['role_id' => 2, 'permission_id' => 1],
             ['role_id' => 2, 'permission_id' => 2],
-            ['role_id' => 2, 'permission_id' => 4],
+            ['role_id' => 2, 'permission_id' => 3],
             // User
             ['role_id' => 3, 'permission_id' => 1],
         ]);

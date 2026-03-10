@@ -10,10 +10,21 @@ class CreateUsersTable extends Migration
     {
         $this->forge->addField([
             'id'         => ['type' => 'VARCHAR', 'constraint' => 36],
-            'role_id'    => ['type' => 'INT', 'constraint' => 11, 'unsigned' => true, 'default' => 3], // 3 = User normal
+            'role_id'    => ['type' => 'INT', 'constraint' => 11, 'unsigned' => true, 'default' => 3], 
             'username'   => ['type' => 'VARCHAR', 'constraint' => 50, 'unique' => true],
             'email'      => ['type' => 'VARCHAR', 'constraint' => 50, 'unique' => true],
             'password'   => ['type' => 'VARCHAR', 'constraint' => 255],
+            'reset_token' => [
+                'type'       => 'VARCHAR',
+                'constraint' => '255',
+                'null'       => true,
+                'default'    => null,
+            ],
+            'reset_expires_at' => [
+                'type'       => 'DATETIME',
+                'null'       => true,
+                'default'    => null,
+            ],
             'created_at' => ['type' => 'DATETIME', 'null' => true],
             'updated_at' => ['type' => 'DATETIME', 'null' => true],
             'deleted_at' => ['type' => 'DATETIME', 'null' => true],

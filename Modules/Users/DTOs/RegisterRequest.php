@@ -10,8 +10,8 @@ class RegisterRequest
 
     public function __construct(array $data)
     {
-        $this->username = $data['username'] ?? '';
-        $this->email    = $data['email'] ?? '';
+        $this->username = trim($data['username'] ?? '');
+        $this->email    = strtolower(trim($data['email'] ?? ''));
         $this->password = $data['password'] ?? '';
     }
 }

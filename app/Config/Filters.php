@@ -35,6 +35,8 @@ class Filters extends BaseFilters
         'pagecache'     => PageCache::class,
         'performance'   => PerformanceMetrics::class,
         'jwt'           => \Modules\Users\Filters\JWTFilter::class,
+        'throttle'      => \App\Filters\Throttle::class,
+        'role' => \Modules\Users\Filters\RoleFilter::class,
     ];
 
     /**
@@ -52,7 +54,7 @@ class Filters extends BaseFilters
      */
     public array $required = [
         'before' => [
-            'forcehttps', // Force Global Secure Requests
+            // 'forcehttps', // Force Global Secure Requests
             'pagecache',  // Web Page Caching
         ],
         'after' => [
@@ -73,6 +75,7 @@ class Filters extends BaseFilters
      */
     public array $globals = [
         'before' => [
+            'cors'
             // 'honeypot',
             // 'csrf',
             // 'invalidchars',
@@ -96,7 +99,8 @@ class Filters extends BaseFilters
      *
      * @var array<string, list<string>>
      */
-    public array $methods = [];
+      public array $methods = [];
+
 
     /**
      * List of filter aliases that should run on any
@@ -107,5 +111,9 @@ class Filters extends BaseFilters
      *
      * @var array<string, array<string, list<string>>>
      */
-    public array $filters = [];
+     public array $filters = [
+        'throttle' => [
+        'before' => ['api/*'] 
+    ],
+    ];
 }

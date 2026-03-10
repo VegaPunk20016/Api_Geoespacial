@@ -7,6 +7,7 @@ use CodeIgniter\Router\RouteCollection;
  */
 $routes->get('/', 'Home::index');
 
+$routes->options('(:any)', 'Home::index'); 
 $modulesPath = ROOTPATH . 'modules/';
 $modules = ['Users', 'DENUE', 'INE'];
 

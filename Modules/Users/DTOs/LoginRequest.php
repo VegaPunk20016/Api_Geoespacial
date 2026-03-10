@@ -9,7 +9,7 @@ class LoginRequest
 
     public function __construct(array $data)
     {
-        $this->email    = $data['email'] ?? '';
+        $this->email    = strtolower(trim($data['email'] ?? ''));
         $this->password = $data['password'] ?? '';
     }
 }

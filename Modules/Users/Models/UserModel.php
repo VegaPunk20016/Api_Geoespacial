@@ -12,6 +12,6 @@ class UserModel extends Model
     protected $useAutoIncrement = false; 
     protected $returnType       = User::class;
     protected $useSoftDeletes   = true;
-    protected $allowedFields    = ['id', 'role_id', 'username', 'email', 'password'];
+    protected $allowedFields = ['id', 'role_id', 'username', 'email', 'password', 'reset_token', 'reset_expires_at'];
     protected $useTimestamps    = true;
 }
