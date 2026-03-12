@@ -47,9 +47,10 @@ class AuthService implements AuthServiceInterface
     public function getAllUsers(): array
     {
         $users = $this->userModel
-        ->select('users.id, users.username, users.email, roles.name as role_name, users.created_at')
-        ->join('roles', 'roles.id = users.role_id')
-        ->paginate(10);
+            ->withDeleted()
+            ->select('users.id, users.username, users.email, roles.name as role_name, users.created_at, users.deleted_at')
+            ->join('roles', 'roles.id = users.role_id')
+            ->paginate(10);
 
         return $users;
     }
@@ -83,7 +84,7 @@ class AuthService implements AuthServiceInterface
             'uid'   => $user->id,
             'email' => $user->email,
             'role'  => $user->role_name,
-            'perms' => $permissions 
+            'perms' => $permissions
         ];
 
         return JWT::encode($payload, getenv('JWT_SECRET'), 'HS256');
@@ -92,22 +93,30 @@ class AuthService implements AuthServiceInterface
     public function updateUser(string $email, UpdateRequest $req): User
     {
         /** @var User|null $user */
-        $user = $this->userModel->where('email', $email)->first();
-        
-        if (!$user) throw new InvalidArgumentException('Usuario no encontrado.');
+        $user = $this->userModel->withDeleted()->where('email', $email)->first();
 
-        if ($req->username !== null) $user->username = $req->username;
-        if ($req->email !== null)    $user->email    = $req->email;
-        if ($req->password !== null) $user->password = $req->password;
-        if ($req->role_id !== null) $user->role_id = $req->role_id;
-
-        if (!$this->userModel->save($user)) {
-            throw new RuntimeException('Error al actualizar.');
+        if (!$user) {
+            throw new InvalidArgumentException('Usuario no encontrado.');
         }
 
-        // --- LA CORRECCIÓN EMPIEZA AQUÍ ---
+        $data = [
+            'username'   => $req->username ?? $user->username,
+            'email'      => $req->email ?? $user->email,
+            'role_id'    => $req->role_id ?? $user->role_id,
+            'deleted_at' => null, 
+        ];
+
+        if ($req->password !== null) {
+            $data['password'] = $req->password;
+        }
+
+
+        if (!$this->userModel->withDeleted()->update($user->id, $data)) {
+            throw new RuntimeException('Error al actualizar el usuario.');
+        }
+
         $updatedUser = $this->userModel->find($user->id);
-        
+
         if (!$updatedUser instanceof User) {
             throw new RuntimeException('Error de tipado: No se pudo recuperar la entidad User actualizada.');
         }
@@ -119,7 +128,7 @@ class AuthService implements AuthServiceInterface
     {
         $user = $this->userModel->where('email', $email)->first();
         if (!$user) throw new InvalidArgumentException('Usuario no encontrado.');
-        
+
         return $this->userModel->delete($user->id);
     }
 
@@ -136,9 +145,9 @@ class AuthService implements AuthServiceInterface
     {
         $user = $this->userModel->where('email', $email)->first();
 
-        if (!$user) return; 
+        if (!$user) return;
 
-        $token = bin2hex(random_bytes(32)); 
+        $token = bin2hex(random_bytes(32));
         $expiresAt = date('Y-m-d H:i:s', strtotime('+1 hour'));
 
         $this->userModel->update($user->id, [
@@ -148,13 +157,13 @@ class AuthService implements AuthServiceInterface
 
         $this->emailService->sendPasswordRecoveryEmail($user->email, $token);
     }
-    
+
 
     public function resetPassword(string $token, string $newPassword): bool
     {
         $user = $this->userModel->where('reset_token', $token)
-                                ->where('reset_expires_at >=', date('Y-m-d H:i:s'))
-                                ->first();
+            ->where('reset_expires_at >=', date('Y-m-d H:i:s'))
+            ->first();
 
         if (!$user) {
             throw new InvalidArgumentException('El token es inválido o ha expirado.');
@@ -166,5 +175,4 @@ class AuthService implements AuthServiceInterface
 
         return $this->userModel->save($user);
     }
-
 }

@@ -112,26 +112,28 @@ class PadronService implements PadronServiceInterface
 
 
 
-   public function obtenerBeneficiarios(string $id): array
-    {
-        $padron = $this->catalogoModel->find($id);
+   public function obtenerBeneficiarios(string $id, array $filtros = []): array
+{
+    $padron = $this->catalogoModel->find($id);
+    if (!$padron) throw new RuntimeException("No existe.");
+
+    $this->modeloDinamico->setTable($padron->nombre_tabla_destino);
+    $query = $this->modeloDinamico->select('id, clave_unica, nombre_completo, municipio, seccion, latitud, longitud, datos_generales');
+
+    // Verificamos que los 4 puntos del "cuadro" existan en el array
+    if (isset($filtros['min_lat'], $filtros['max_lat'], $filtros['min_lng'], $filtros['max_lng']) && 
+        $filtros['min_lat'] !== null) {
         
-        if (!$padron) {
-            throw new RuntimeException("El padrón solicitado no existe.");
-        }
-
-        $nombreTabla = $padron->nombre_tabla_destino;
-
-        if (!$this->db->tableExists($nombreTabla)) {
-            throw new RuntimeException("La tabla de datos espaciales aún no ha sido generada para este padrón.");
-        }
-
-        // ✨ 5. Uso elegante de la dependencia inyectada
-        $this->modeloDinamico->setTable($nombreTabla);
-
-        return $this->modeloDinamico->select('id, clave_unica, nombre_completo, municipio, latitud, longitud, datos_generales')
-                                    ->findAll(1000);
+        $query->where('latitud >=', (float)$filtros['min_lat'])
+              ->where('latitud <=', (float)$filtros['max_lat'])
+              ->where('longitud >=', (float)$filtros['min_lng'])
+              ->where('longitud <=', (float)$filtros['max_lng']);
+        
+        return $query->findAll(5000); 
     }
+
+    return $query->findAll(1000); // Esto solo sale si NO hay coordenadas
+}
 
     public function eliminarPadron(string $idPadron, bool $permanente = false): bool
     {
@@ -142,8 +144,16 @@ class PadronService implements PadronServiceInterface
         }
 
         if ($permanente) {
-            $this->catalogoModel->delete($idPadron, true);
+            // ✅ FIX: deshabilitar FKs antes del borrado para evitar timeout
+            $this->db->query("SET FOREIGN_KEY_CHECKS=0");
+
+            try {
+                // Borrar tabla física PRIMERO, luego el registro del catálogo
                 $this->tableService->eliminarTabla($padron->nombre_tabla_destino);
+                $this->catalogoModel->delete($idPadron, true);
+            } finally {
+                $this->db->query("SET FOREIGN_KEY_CHECKS=1");
+            }
         } else {
             $this->catalogoModel->delete($idPadron);
         }

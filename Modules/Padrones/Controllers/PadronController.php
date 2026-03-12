@@ -77,12 +77,21 @@ class PadronController extends ResourceController
     public function getBeneficiarios($id = null)
     {
         try {
-
             if (!$id) {
                 return $this->failValidationErrors('El ID del padrón es obligatorio.');
             }
 
-            $beneficiarios = $this->padronService->obtenerBeneficiarios($id);
+            // 1. Recolectamos los filtros de la URL (si existen)
+            $filtros = [
+                'min_lat' => $this->request->getGet('min_lat'),
+                'max_lat' => $this->request->getGet('max_lat'),
+                'min_lng' => $this->request->getGet('min_lng'),
+                'max_lng' => $this->request->getGet('max_lng'),
+            ];
+
+            // 2. Llamamos al Service pasando el ID y los filtros
+            // Si los filtros van vacíos, el Service ya sabe que debe devolver los primeros 1000
+            $beneficiarios = $this->padronService->obtenerBeneficiarios($id, $filtros);
 
             return $this->respond([
                 'status' => 200,
@@ -90,11 +99,11 @@ class PadronController extends ResourceController
                 'data'   => $beneficiarios
             ]);
         } catch (RuntimeException $e) {
-
+            // Error específico (ej: Padrón no encontrado)
             return $this->failNotFound($e->getMessage());
         } catch (Exception $e) {
-
-            return $this->failServerError($e->getMessage());
+            // Error genérico del servidor
+            return $this->failServerError('Error al obtener registros: ' . $e->getMessage());
         }
     }
 
@@ -212,5 +221,20 @@ class PadronController extends ResourceController
         } catch (Exception $e) {
             return $this->failServerError($e->getMessage());
         }
+    }
+
+
+    public function datos($id)
+    {
+        // Capturamos los datos del GET
+        $filtros = [
+            'min_lat' => $this->request->getGet('min_lat'),
+            'max_lat' => $this->request->getGet('max_lat'),
+            'min_lng' => $this->request->getGet('min_lng'),
+            'max_lng' => $this->request->getGet('max_lng'),
+        ];
+
+        $data = $this->padronService->obtenerBeneficiarios($id, $filtros);
+        return $this->response->setJSON($data);
     }
 }
