@@ -29,27 +29,39 @@ class PadronTableService
             'nombre_completo'    => ['type' => 'VARCHAR', 'constraint' => 255],
             'municipio'          => ['type' => 'VARCHAR', 'constraint' => 255,    'null' => true],
             'seccion'            => ['type' => 'VARCHAR', 'constraint' => 255,    'null' => true],
-            'latitud'            => ['type' => 'DECIMAL', 'constraint' => '10,8', 'null' => true],
-            'longitud'           => ['type' => 'DECIMAL', 'constraint' => '11,8', 'null' => true],
+            'latitud'            => ['type' => 'DECIMAL', 'constraint' => '10,7', 'null' => true],
+            'longitud'           => ['type' => 'DECIMAL', 'constraint' => '11,7', 'null' => true],
             'datos_generales'    => ['type' => 'JSON',    'null' => true],
             'estatus_duplicidad' => [
                 'type'       => 'ENUM',
-                // ✅ FIX: agregado 'generado_por_sistema' para padrones sin clave natural
                 'constraint' => ['limpio', 'repetido', 'generado_por_sistema'],
                 'default'    => 'limpio',
             ],
-            'created_at'         => ['type' => 'DATETIME', 'null' => true],
+            'created_at' => ['type' => 'DATETIME', 'null' => true],
         ];
 
         $this->forge->addField($campos);
+
+        // --- LLAVE PRIMARIA ---
         $this->forge->addKey('id', true);
+
+        // --- ÍNDICES INDIVIDUALES ---
         $this->forge->addKey('clave_unica');
         $this->forge->addKey('nombre_completo');
         $this->forge->addKey('municipio');
+        $this->forge->addKey('seccion');
         $this->forge->addKey(['latitud', 'longitud']);
+        $this->forge->addKey(['municipio', 'latitud', 'longitud']);
 
         $nombreFk = 'fk_cp_' . substr($uuid, 0, 8);
-        $this->forge->addForeignKey('catalogo_padron_id', 'catalogo_padrones', 'id', 'CASCADE', 'CASCADE', $nombreFk);
+        $this->forge->addForeignKey(
+            'catalogo_padron_id',
+            'catalogo_padrones',
+            'id',
+            'CASCADE',
+            'CASCADE',
+            $nombreFk
+        );
 
         $this->forge->createTable($tabla);
     }
@@ -57,8 +69,36 @@ class PadronTableService
     public function eliminarTabla(string $tabla): void
     {
         if ($this->db->tableExists($tabla)) {
-            // FK checks son deshabilitados por PadronService antes de llamar aquí
             $this->forge->dropTable($tabla, true);
+        }
+    }
+
+   public function optimizarIndices(string $tabla): void
+    {
+        if (!$this->db->tableExists($tabla)) {
+            return;
+        }
+
+        $tablaSegura = $this->db->escapeIdentifier($tabla);
+
+        $indicesExistentes = array_column(
+            $this->db->query("SHOW INDEX FROM {$tablaSegura}")->getResultArray(),
+            'Key_name'
+        );
+
+        // Se agregan los índices compuestos necesarios para consultas espaciales
+        $indicesNecesarios = [
+            'idx_mun'     => "ALTER TABLE {$tablaSegura} ADD INDEX idx_mun (municipio)",
+            'idx_seccion' => "ALTER TABLE {$tablaSegura} ADD INDEX idx_seccion (seccion)",
+            'idx_clave'   => "ALTER TABLE {$tablaSegura} ADD INDEX idx_clave (clave_unica)",
+            'idx_geo'     => "ALTER TABLE {$tablaSegura} ADD INDEX idx_geo (latitud, longitud)",
+            'idx_mun_geo' => "ALTER TABLE {$tablaSegura} ADD INDEX idx_mun_geo (municipio, latitud, longitud)",
+        ];
+
+        foreach ($indicesNecesarios as $nombre => $sql) {
+            if (!in_array($nombre, $indicesExistentes, true)) {
+                $this->db->query($sql);
+            }
         }
     }
 }

@@ -107,6 +107,54 @@ class PadronController extends ResourceController
         }
     }
 
+
+
+    public function buscar($id = null)
+    {
+        try {
+            if (!$id) {
+                return $this->failValidationErrors('El ID del padrón es obligatorio.');
+            }
+
+            $termino = $this->request->getGet('q');
+
+            if (!$termino || strlen(trim($termino)) < 2) {
+                return $this->respond([
+                    'status' => 200,
+                    'data'   => []
+                ]);
+            }
+
+            // Llamamos al nuevo método del servicio
+            $resultados = $this->padronService->buscarBeneficiario($id, $termino);
+
+            return $this->respond([
+                'status' => 200,
+                'data'   => $resultados
+            ]);
+
+        } catch (RuntimeException $e) {
+            return $this->failNotFound($e->getMessage());
+        } catch (Exception $e) {
+            return $this->failServerError('Error en la búsqueda: ' . $e->getMessage());
+        }
+    }
+
+    public function getResumen($id = null)
+    {
+        try {
+            $municipio = $this->request->getGet('municipio'); // Puede ser null
+            $data = $this->padronService->obtenerResumenAgnostico($id, $municipio);
+            
+            return $this->respond([
+                'status' => 200,
+                'data'   => $data
+            ]);
+        } catch (Exception $e) {
+            return $this->failServerError($e->getMessage());
+        }
+    }
+
     // ============================================================
     // POST /api/padrones
     // ============================================================
@@ -224,17 +272,47 @@ class PadronController extends ResourceController
     }
 
 
-    public function datos($id)
+    
+    public function getClusters($id = null)
     {
-        // Capturamos los datos del GET
-        $filtros = [
-            'min_lat' => $this->request->getGet('min_lat'),
-            'max_lat' => $this->request->getGet('max_lat'),
-            'min_lng' => $this->request->getGet('min_lng'),
-            'max_lng' => $this->request->getGet('max_lng'),
-        ];
-
-        $data = $this->padronService->obtenerBeneficiarios($id, $filtros);
-        return $this->response->setJSON($data);
+        try {
+            if (!$id) {
+                return $this->failValidationErrors('El ID del padrón es obligatorio.');
+            }
+ 
+            $zoom   = (int)($this->request->getGet('zoom') ?? 10);
+            $filtros = [
+                'min_lat' => $this->request->getGet('min_lat'),
+                'max_lat' => $this->request->getGet('max_lat'),
+                'min_lng' => $this->request->getGet('min_lng'),
+                'max_lng' => $this->request->getGet('max_lng'),
+                'zoom'    => $zoom,
+            ];
+ 
+            if ($zoom >= 13) {
+                // Zoom alto → puntos reales con BBOX (reutiliza lógica existente)
+                $data = $this->padronService->obtenerBeneficiarios($id, $filtros);
+                return $this->respond([
+                    'status' => 200,
+                    'modo'   => 'puntos',
+                    'total'  => count($data),
+                    'data'   => $data,
+                ]);
+            }
+ 
+            // Zoom bajo → clusters del servidor
+            $data = $this->padronService->obtenerClusters($id, $filtros);
+            return $this->respond([
+                'status' => 200,
+                'modo'   => 'clusters',
+                'total'  => count($data),
+                'data'   => $data,
+            ]);
+ 
+        } catch (RuntimeException $e) {
+            return $this->failNotFound($e->getMessage());
+        } catch (Exception $e) {
+            return $this->failServerError('Error: ' . $e->getMessage());
+        }
     }
 }

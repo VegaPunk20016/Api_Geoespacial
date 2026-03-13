@@ -10,6 +10,7 @@ use CodeIgniter\Cache\Handlers\MemcachedHandler;
 use CodeIgniter\Cache\Handlers\PredisHandler;
 use CodeIgniter\Cache\Handlers\RedisHandler;
 use CodeIgniter\Cache\Handlers\WincacheHandler;
+use CodeIgniter\Cache\Handlers\DatabaseHandler;
 use CodeIgniter\Config\BaseConfig;
 
 class Cache extends BaseConfig

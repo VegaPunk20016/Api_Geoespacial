@@ -6,8 +6,8 @@ use CodeIgniter\Config\BaseService;
 use Modules\Padrones\Services\PadronService;
 use Modules\Padrones\Services\PadronTableService;
 use Modules\Padrones\Services\PadronImportService;
-use Modules\Padrones\Services\PadronMapperService; 
-use Modules\Padrones\Services\FileConverterService; // ✨ 1. Importamos el nuevo servicio
+use Modules\Padrones\Services\PadronMapperService;
+use Modules\Padrones\Services\FileConverterService;
 use Modules\Padrones\Models\CatalogoPadronModel;
 use Modules\Padrones\Models\BeneficiarioDinamicoModel;
 
@@ -19,29 +19,27 @@ class Services extends BaseService
             return static::getSharedInstance('padronService');
         }
 
-        $db = \Config\Database::connect();
+        $db    = \Config\Database::connect();
         $forge = \Config\Database::forge();
-        
-        // 1. Instanciamos los Modelos
-        $catalogoModel = new CatalogoPadronModel();
+
+        $catalogoModel  = new CatalogoPadronModel();
         $modeloDinamico = new BeneficiarioDinamicoModel();
-        
-        // 2. Instanciamos las herramientas independientes
-        $mapper = new PadronMapperService(); 
-        $converterService = new FileConverterService(); // ✨ 2. Creamos la instancia del convertidor
+        $mapper         = new PadronMapperService();
+        $converterService = new FileConverterService();
+        $tableService   = new PadronTableService($forge, $db);
+        $importService  = new PadronImportService($db, $mapper);
 
-        // 3. Instanciamos los Servicios que dependen de la BD o del Mapper
-        $tableService = new PadronTableService($forge, $db);
-        $importService = new PadronImportService($db, $mapper);
+        // Cache handler de CI4 — configurado para usar MySQL en app/Config/Cache.php
+        $cache = \Config\Services::cache();
 
-        // 4. Retornamos el PadronService inyectando TODOS los componentes
         return new PadronService(
-            $catalogoModel, 
-            $modeloDinamico, 
-            $db, 
-            $tableService, 
+            $catalogoModel,
+            $modeloDinamico,
+            $db,
+            $tableService,
             $importService,
-            $converterService 
+            $converterService,
+            $cache
         );
     }
 }

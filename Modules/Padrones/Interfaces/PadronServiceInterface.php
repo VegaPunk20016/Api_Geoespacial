@@ -9,13 +9,12 @@ use Modules\Padrones\Entities\CatalogoPadron;
 interface PadronServiceInterface
 {
     public function crearNuevoPadron(CreatePadronRequest $request): CatalogoPadron;
-
     public function procesarCargaMasiva(ImportCsvRequest $request): array;
-
     public function obtenerTodosLosPadrones(): array;
-
     public function obtenerPadronPorId(string $id): ?CatalogoPadron;
-
-    public function obtenerBeneficiarios(string $id): array;
+    public function obtenerBeneficiarios(string $id, array $filtros = []): array;
+    public function obtenerClusters(string $id, array $filtros = []): array;
+    public function buscarBeneficiario(string $id, string $termino): array;
+    public function obtenerResumenAgnostico(string $id, ?string $municipio = null): array;
     public function eliminarPadron(string $idPadron, bool $permanente = false): bool;
 }
