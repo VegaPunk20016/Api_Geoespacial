@@ -58,6 +58,7 @@ class PadronImportService
         }
 
         $headers = $this->detectarHeaders($handle);
+        log_message('debug', '[HEADERS] ' . json_encode($headers));
         if (!$headers) {
             fclose($handle);
             throw new RuntimeException("CSV sin encabezados o archivo vacío.");
@@ -107,7 +108,6 @@ class PadronImportService
             $this->restaurarConfiguracionMysql();
             throw new RuntimeException("Error cerca del registro #{$resumen['procesados']}: " . $e->getMessage());
         }
-log_message('debug', '[HEADERS] ' . json_encode($headers));
         fclose($handle);
         $this->restaurarConfiguracionMysql();
 

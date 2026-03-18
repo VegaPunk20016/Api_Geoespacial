@@ -13,8 +13,10 @@ $routes->group('api/padrones', ['namespace' => 'Modules\Padrones\Controllers'], 
         $routes->get('(:segment)/beneficiarios', 'PadronController::getBeneficiarios/$1');
         $routes->get('(:segment)/clusters',      'PadronController::getClusters/$1');
         $routes->get('(:segment)/buscar',        'PadronController::buscar/$1');
+        $routes->get('(:segment)/resumen',       'PadronController::getResumen/$1');
+
+        // La ruta genérica va al final, después de todas las específicas
         $routes->get('(:segment)',               'PadronController::show/$1');
-        $routes->get('(:segment)/resumen', 'PadronController::getResumen/$1');
     });
 
     $routes->group('', ['filter' => ['jwt', 'role:super_admin,admin']], function ($routes) {

@@ -10,9 +10,14 @@ use Modules\Padrones\Interfaces\PadronServiceInterface;
 use Exception;
 use RuntimeException;
 
-
 class PadronController extends ResourceController
 {
+    /**
+     * Umbral de zoom a partir del cual se devuelven puntos reales en lugar de clusters.
+     * Declarado como constante para que sea el único lugar donde vive esta lógica.
+     * El frontend ya no necesita conocer este valor — lee el campo `modo` de la respuesta.
+     */
+    private const ZOOM_UMBRAL_PUNTOS = 13;
 
     protected PadronServiceInterface $padronService;
 
@@ -21,7 +26,6 @@ class PadronController extends ResourceController
         $this->padronService = Services::padronService();
     }
 
-
     // ============================================================
     // GET /api/padrones
     // ============================================================
@@ -29,15 +33,13 @@ class PadronController extends ResourceController
     public function index()
     {
         try {
-
             $padrones = $this->padronService->obtenerTodosLosPadrones();
 
             return $this->respond([
                 'status' => 200,
-                'data'   => $padrones
+                'data'   => $padrones,
             ]);
         } catch (Exception $e) {
-
             return $this->failServerError($e->getMessage());
         }
     }
@@ -49,7 +51,6 @@ class PadronController extends ResourceController
     public function show($id = null)
     {
         try {
-
             if (!$id) {
                 return $this->failValidationErrors('El ID del padrón es obligatorio.');
             }
@@ -62,10 +63,9 @@ class PadronController extends ResourceController
 
             return $this->respond([
                 'status' => 200,
-                'data'   => $padron
+                'data'   => $padron,
             ]);
         } catch (Exception $e) {
-
             return $this->failServerError($e->getMessage());
         }
     }
@@ -81,7 +81,6 @@ class PadronController extends ResourceController
                 return $this->failValidationErrors('El ID del padrón es obligatorio.');
             }
 
-            // 1. Recolectamos los filtros de la URL (si existen)
             $filtros = [
                 'min_lat' => $this->request->getGet('min_lat'),
                 'max_lat' => $this->request->getGet('max_lat'),
@@ -89,25 +88,23 @@ class PadronController extends ResourceController
                 'max_lng' => $this->request->getGet('max_lng'),
             ];
 
-            // 2. Llamamos al Service pasando el ID y los filtros
-            // Si los filtros van vacíos, el Service ya sabe que debe devolver los primeros 1000
             $beneficiarios = $this->padronService->obtenerBeneficiarios($id, $filtros);
 
             return $this->respond([
                 'status' => 200,
                 'total'  => count($beneficiarios),
-                'data'   => $beneficiarios
+                'data'   => $beneficiarios,
             ]);
         } catch (RuntimeException $e) {
-            // Error específico (ej: Padrón no encontrado)
             return $this->failNotFound($e->getMessage());
         } catch (Exception $e) {
-            // Error genérico del servidor
             return $this->failServerError('Error al obtener registros: ' . $e->getMessage());
         }
     }
 
-
+    // ============================================================
+    // GET /api/padrones/{id}/buscar
+    // ============================================================
 
     public function buscar($id = null)
     {
@@ -119,20 +116,15 @@ class PadronController extends ResourceController
             $termino = $this->request->getGet('q');
 
             if (!$termino || strlen(trim($termino)) < 2) {
-                return $this->respond([
-                    'status' => 200,
-                    'data'   => []
-                ]);
+                return $this->respond(['status' => 200, 'data' => []]);
             }
 
-            // Llamamos al nuevo método del servicio
-            $resultados = $this->padronService->buscarBeneficiario($id, $termino);
+            $resultados = $this->padronService->buscarMunicipios($id, $termino);
 
             return $this->respond([
                 'status' => 200,
-                'data'   => $resultados
+                'data'   => $resultados,
             ]);
-
         } catch (RuntimeException $e) {
             return $this->failNotFound($e->getMessage());
         } catch (Exception $e) {
@@ -140,15 +132,19 @@ class PadronController extends ResourceController
         }
     }
 
+    // ============================================================
+    // GET /api/padrones/{id}/resumen
+    // ============================================================
+
     public function getResumen($id = null)
     {
         try {
-            $municipio = $this->request->getGet('municipio'); // Puede ser null
-            $data = $this->padronService->obtenerResumenAgnostico($id, $municipio);
-            
+            $municipio = $this->request->getGet('municipio');
+            $data      = $this->padronService->obtenerResumenAgnostico($id, $municipio);
+
             return $this->respond([
                 'status' => 200,
-                'data'   => $data
+                'data'   => $data,
             ]);
         } catch (Exception $e) {
             return $this->failServerError($e->getMessage());
@@ -162,7 +158,6 @@ class PadronController extends ResourceController
     public function create()
     {
         try {
-
             $json = $this->request->getJSON();
 
             if (!$json) {
@@ -182,10 +177,9 @@ class PadronController extends ResourceController
             return $this->respondCreated([
                 'status'  => 201,
                 'message' => 'Padrón creado correctamente.',
-                'data'    => $nuevoPadron
+                'data'    => $nuevoPadron,
             ]);
         } catch (Exception $e) {
-
             return $this->failServerError($e->getMessage());
         }
     }
@@ -201,25 +195,21 @@ class PadronController extends ResourceController
                 return $this->failValidationErrors('El ID del padrón es obligatorio.');
             }
 
-            // 1. Capturamos el archivo
             $archivo = $this->request->getFile('archivo');
 
-            // 🕵️‍♂️ DETECTIVE: Error de Comunicación (Frontend/Axios)
             if (!$archivo) {
                 return $this->failValidationErrors(
                     'Error A: No se recibió la variable "archivo". Verifica el FormData en Vue.'
                 );
             }
 
-            // 🕵️‍♂️ DETECTIVE: Error de Configuración (PHP.ini/Permisos)
             if (!$archivo->isValid()) {
                 return $this->failValidationErrors(
                     'Error B: PHP bloqueó la carga. Motivo: ' . $archivo->getErrorString() .
-                        ' (Código ' . $archivo->getError() . ')'
+                    ' (Código ' . $archivo->getError() . ')'
                 );
             }
 
-            // 2. Validación de Formatos (DTO)
             $dto = new ImportCsvRequest($padronId, $archivo);
 
             if (!$dto->isValid()) {
@@ -228,32 +218,27 @@ class PadronController extends ResourceController
                 );
             }
 
-            // 3. Procesamiento (Aquí es donde entran el Converter y el ImportService)
             $resultado = $this->padronService->procesarCargaMasiva($dto);
 
             return $this->respond([
                 'status'  => 200,
                 'message' => 'Carga masiva completada con éxito.',
-                'data'    => $resultado
+                'data'    => $resultado,
             ]);
         } catch (\RuntimeException $e) {
-            // 🚨 CAMBIO CRÍTICO: Usamos failValidationErrors (400) en lugar de failNotFound (404)
-            // para que el frontend sepa que es un error de los DATOS del archivo.
             return $this->failValidationErrors($e->getMessage());
         } catch (\Exception $e) {
-            // Error inesperado (500)
             return $this->failServerError('Error interno: ' . $e->getMessage());
         }
     }
 
-    /**
-     * Método adicional para eliminar un padrón y su tabla asociada (Eliminacion directa)
-     */
+    // ============================================================
+    // DELETE /api/padrones/{id}
+    // ============================================================
 
     public function delete($id = null)
     {
         try {
-            // Leemos si la URL trae el flag de purga total: ?permanente=true
             $esPermanente = $this->request->getGet('permanente') === 'true';
 
             $this->padronService->eliminarPadron($id, $esPermanente);
@@ -263,35 +248,46 @@ class PadronController extends ResourceController
                 : 'Padrón enviado a la papelera (Borrado lógico).';
 
             return $this->respondDeleted([
-                'status' => 200,
-                'message' => $mensaje
+                'status'  => 200,
+                'message' => $mensaje,
             ]);
         } catch (Exception $e) {
             return $this->failServerError($e->getMessage());
         }
     }
 
+    // ============================================================
+    // GET /api/padrones/{id}/clusters
+    //
+    // Punto de entrada único para el mapa.
+    // Decide internamente qué devolver según el zoom:
+    //   zoom >= ZOOM_UMBRAL_PUNTOS → puntos reales (hasta 5000, filtrados por BBOX)
+    //   zoom <  ZOOM_UMBRAL_PUNTOS → clusters agrupados del servidor
+    //
+    // La respuesta incluye { modo: 'puntos'|'clusters' } para que el frontend
+    // sepa qué recibió sin necesidad de conocer el umbral.
+    // ============================================================
 
-    
     public function getClusters($id = null)
     {
         try {
             if (!$id) {
                 return $this->failValidationErrors('El ID del padrón es obligatorio.');
             }
- 
-            $zoom   = (int)($this->request->getGet('zoom') ?? 10);
+
+            $zoom    = (int)($this->request->getGet('zoom') ?? 10);
             $filtros = [
-                'min_lat' => $this->request->getGet('min_lat'),
-                'max_lat' => $this->request->getGet('max_lat'),
-                'min_lng' => $this->request->getGet('min_lng'),
-                'max_lng' => $this->request->getGet('max_lng'),
-                'zoom'    => $zoom,
+                'min_lat'  => $this->request->getGet('min_lat'),
+                'max_lat'  => $this->request->getGet('max_lat'),
+                'min_lng'  => $this->request->getGet('min_lng'),
+                'max_lng'  => $this->request->getGet('max_lng'),
+                'municipio'=> $this->request->getGet('municipio'),
+                'zoom'     => $zoom,
             ];
- 
-            if ($zoom >= 13) {
-                // Zoom alto → puntos reales con BBOX (reutiliza lógica existente)
+
+            if ($zoom >= self::ZOOM_UMBRAL_PUNTOS) {
                 $data = $this->padronService->obtenerBeneficiarios($id, $filtros);
+
                 return $this->respond([
                     'status' => 200,
                     'modo'   => 'puntos',
@@ -299,16 +295,16 @@ class PadronController extends ResourceController
                     'data'   => $data,
                 ]);
             }
- 
-            // Zoom bajo → clusters del servidor
+
             $data = $this->padronService->obtenerClusters($id, $filtros);
+
             return $this->respond([
                 'status' => 200,
                 'modo'   => 'clusters',
                 'total'  => count($data),
                 'data'   => $data,
             ]);
- 
+
         } catch (RuntimeException $e) {
             return $this->failNotFound($e->getMessage());
         } catch (Exception $e) {

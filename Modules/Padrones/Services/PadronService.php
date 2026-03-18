@@ -154,16 +154,12 @@ class PadronService implements PadronServiceInterface
         $tieneBbox = isset($filtros['min_lat'], $filtros['max_lat'], $filtros['min_lng'], $filtros['max_lng'])
             && $filtros['min_lat'] !== null;
 
-        /**
-         * Lógica de Limpieza:
-         * Priorizamos 'municipio' (nombre). Si es el string "null" o está vacío, lo tratamos como nulo.
-         */
         $municipioFiltro = $filtros['municipio'] ?? $filtros['municipio_cvegeo'] ?? null;
         $municipio = ($municipioFiltro !== null && $municipioFiltro !== 'null' && $municipioFiltro !== '')
             ? trim($municipioFiltro)
             : '';
 
-        // Generación de Clave de Caché
+        // Generación de clave de caché
         if ($tieneBbox) {
             $p        = self::BBOX_PRECISION;
             $minLat   = round((float)$filtros['min_lat'], $p);
@@ -180,7 +176,7 @@ class PadronService implements PadronServiceInterface
         $cached = $this->cache->get($cacheKey);
         if ($cached !== null) return $cached;
 
-        // Consulta a la Base de Datos
+        // Consulta a la base de datos
         $this->modeloDinamico->setTable($padron->nombre_tabla_destino);
         $builder = $this->modeloDinamico->select(
             'id, clave_unica, nombre_completo, municipio, seccion, latitud, longitud, datos_generales'
@@ -196,15 +192,10 @@ class PadronService implements PadronServiceInterface
                 ->where('longitud <=', (float)$filtros['max_lng']);
         }
 
-        /**
-         * Filtro de Municipio:
-         * Usamos la columna 'municipio' directamente para aprovechar el índice B-Tree
-         */
         if ($municipio !== '') {
             $builder->where('municipio', $municipio);
         }
 
-        // Limitamos a 5000 para no saturar el navegador con demasiados nodos DOM
         $resultado = $builder->findAll($tieneBbox ? 5000 : 1000);
 
         $this->cache->save($cacheKey, $resultado, self::TTL_BBOX);
@@ -224,7 +215,6 @@ class PadronService implements PadronServiceInterface
 
         $zoom = (int)($filtros['zoom'] ?? 10);
 
-        // Definimos precisión de agrupación según el nivel de zoom
         if ($zoom <= 9)      $precision = 1;
         elseif ($zoom <= 11) $precision = 2;
         else                 $precision = 3;
@@ -232,7 +222,6 @@ class PadronService implements PadronServiceInterface
         $tieneBbox = isset($filtros['min_lat'], $filtros['max_lat'], $filtros['min_lng'], $filtros['max_lng'])
             && $filtros['min_lat'] !== null;
 
-        // Lógica de limpieza idéntica para consistencia
         $municipioFiltro = $filtros['municipio'] ?? $filtros['municipio_cvegeo'] ?? null;
         $municipio = ($municipioFiltro !== null && $municipioFiltro !== 'null' && $municipioFiltro !== '')
             ? trim($municipioFiltro)
@@ -270,7 +259,6 @@ class PadronService implements PadronServiceInterface
                 ->where('longitud <=', (float)$filtros['max_lng']);
         }
 
-        // Filtro de Municipio
         if ($municipio !== '') {
             $builder->where('municipio', $municipio);
         }
@@ -298,13 +286,23 @@ class PadronService implements PadronServiceInterface
         if (!$padron) throw new RuntimeException("El padrón no existe.");
 
         if ($permanente) {
-            $this->db->query("SET FOREIGN_KEY_CHECKS=0");
+            // CORRECCIÓN: en lugar de deshabilitar FOREIGN_KEY_CHECKS globalmente
+            // (lo que afecta a toda la sesión compartida en entornos con pool de conexiones),
+            // eliminamos la FK explícitamente antes de hacer DROP TABLE.
+            // Esto es seguro y no tiene efectos secundarios en otras peticiones concurrentes.
+            $nombreFk = 'fk_cp_' . substr($idPadron, 0, 8);
+            $tabla    = $this->db->escapeIdentifier($padron->nombre_tabla_destino);
+
             try {
-                $this->tableService->eliminarTabla($padron->nombre_tabla_destino);
-                $this->catalogoModel->delete($idPadron, true);
-            } finally {
-                $this->db->query("SET FOREIGN_KEY_CHECKS=1");
+                // Intentamos eliminar la FK. Si por algún motivo ya no existe, ignoramos el error.
+                $this->db->query("ALTER TABLE {$tabla} DROP FOREIGN KEY `{$nombreFk}`");
+            } catch (\Throwable $e) {
+                // La FK puede no existir si la tabla fue alterada manualmente — no es fatal.
+                log_message('warning', "[eliminarPadron] No se pudo eliminar FK '{$nombreFk}': " . $e->getMessage());
             }
+
+            $this->tableService->eliminarTabla($padron->nombre_tabla_destino);
+            $this->catalogoModel->delete($idPadron, true);
         } else {
             $this->catalogoModel->delete($idPadron);
         }
@@ -315,7 +313,19 @@ class PadronService implements PadronServiceInterface
         return true;
     }
 
-    public function buscarBeneficiario(string $id, string $termino): array
+    // =========================================================
+    // BUSCAR MUNICIPIOS (autocomplete del mapa)
+    // =========================================================
+
+    /**
+     * Busca municipios cuyo nombre coincida con el término dado.
+     * Devuelve agrupaciones { municipio_estandarizado, total_registros },
+     * NO registros individuales de beneficiarios.
+     *
+     * Renombrado de buscarBeneficiario → buscarMunicipios para reflejar
+     * correctamente lo que retorna.
+     */
+    public function buscarMunicipios(string $id, string $termino): array
     {
         $padron = $this->catalogoModel->find($id);
         if (!$padron) throw new RuntimeException("El padrón no existe.");
@@ -329,7 +339,7 @@ class PadronService implements PadronServiceInterface
             ->where('municipio !=', '')
             ->groupBy('TRIM(municipio)')
             ->orderBy('total_registros', 'DESC')
-            ->limit(10) // Traemos las 10 coincidencias más grandes
+            ->limit(10)
             ->get()
             ->getResultArray();
     }
@@ -360,7 +370,7 @@ class PadronService implements PadronServiceInterface
 
         $tabla = $this->db->escapeIdentifier($padron->nombre_tabla_destino);
 
-        // CASO A: Si no hay municipio, es para el mapa (Coropletas)
+        // CASO A: sin municipio → conteo global para coropletas
         if ($municipio === null) {
             return $this->db->table($tabla)
                 ->select('municipio, COUNT(id) as total')
@@ -370,10 +380,10 @@ class PadronService implements PadronServiceInterface
                 ->getResultArray();
         }
 
-        // CASO B: Análisis profundo de un municipio específico
+        // CASO B: análisis profundo de un municipio específico
         $municipio = trim($municipio);
 
-        // 1. Tomamos una muestra para detectar llaves del JSON
+        // Tomamos una muestra para detectar llaves del JSON
         $row = $this->db->table($tabla)
             ->select('datos_generales')
             ->where('municipio', $municipio)
@@ -386,7 +396,6 @@ class PadronService implements PadronServiceInterface
         if ($row) {
             $json = json_decode($row['datos_generales'], true);
             foreach ($json as $key => $val) {
-                // Si el valor de la muestra es numérico, intentaremos sumarlo
                 if (is_numeric($val)) {
                     $camposSumables[] = $key;
                 }
@@ -400,7 +409,7 @@ class PadronService implements PadronServiceInterface
         foreach ($camposSumables as $campo) {
             $builder->selectSum("CAST(datos_generales->>'$.\"{$campo}\"' AS UNSIGNED)", "sum_{$campo}");
         }
-        
+
         return [
             'municipio' => $municipio,
             'stats'     => $builder->get()->getRowArray(),

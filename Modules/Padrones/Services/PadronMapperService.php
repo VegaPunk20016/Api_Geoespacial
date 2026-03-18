@@ -11,7 +11,7 @@ class PadronMapperService
     private string $reNombreSolo = '/^(nombre|nombres|primer_nombre|name)$/i';
     private string $rePaterno  = '/^(paterno|apellido_paterno|apellido_1|ap_pat|primer_apellido|last_name)$/i';
     private string $reMaterno  = '/^(materno|apellido_materno|apellido_2|ap_mat|segundo_apellido)$/i';
-    private string $reMunicipio= '/^(municipio|municipio_nombre|nom_mun|nombre_municipio|cve_mun|c_mnpio|cvemun|delegacion|alcaldia|ciudad|localidad|nom_loc|demarcacion)$/i';
+    private string $reMunicipio= '/^(municipio|municipio_nombre|nom_mun|nombre_municipio|cve_mun|c_mnpio|cvemun)$/i';
     private string $reEstado   = '/^(estado|entidad|entidad_federativa|entidad_nombre|nom_ent|cve_ent|c_estado|cveent|estado_nombre|estado_republica|nombre_estado|id_estado)$/i';
     private string $reSeccion  = '/^(seccion|seccion_electoral|num_seccion|cve_seccion)$/i';
     private string $reLatitud  = '/^(latitud|lat|latitude|coord_lat|y_coord|coordenada_y|geo_lat)$/i';
