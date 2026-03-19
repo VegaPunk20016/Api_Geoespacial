@@ -13,18 +13,36 @@ class PadronImportService
     private PadronMapperService $mapper;
     private int $batchSize = 3000;
 
-    // Campos canónicos — si una fila tiene ≥3 de estos, ES el header
+    /**
+     * Campos canónicos para detectar la fila de headers.
+     * Cuántos de estos aparezcan en una fila → más probable que sea el header.
+     * Incluye variantes electorales, DENUE, padrón social, resultados.
+     */
     private array $camposCanonicos = [
-        'clee','curp','rfc','folio','clave','matricula','expediente',
-        'nom_estab','nombre_completo','razon_social','beneficiario',
-        'municipio','nom_mun','delegacion','alcaldia',
-        'seccion','casilla','casillas','distrito',
-        'entidad','estado','nom_ent','nombre_estado','id_estado',
-        'latitud','longitud','lat','lon','lng',
-        'pan','pri','prd','morena','pvem','pt','mc',
-        'nombre','paterno','materno','apellido',
-        'calle','colonia','cp','telefono','email','fecha_alta',
-        'id_municipio','id_distrito_local','lista_nominal',
+        // Identificadores
+        'clee', 'curp', 'rfc', 'folio', 'clave', 'matricula', 'expediente',
+        'id', 'id_unico', 'id_beneficiario', 'id_municipio', 'num_folio',
+        // Nombre
+        'nombre', 'nombre_completo', 'nombres', 'beneficiario', 'nom_estab',
+        'razon_social', 'titular', 'propietario',
+        // Apellidos
+        'paterno', 'materno', 'apellido', 'apellido_paterno', 'apellido_materno',
+        // Ubicación
+        'municipio', 'nom_mun', 'delegacion', 'alcaldia', 'entidad', 'estado',
+        'calle', 'colonia', 'direccion',
+        // Postal / sección
+        'cp', 'c_p', 'codigo_postal', 'cod_post', 'zip', 'zip_code', 'postal_code',
+        'seccion', 'seccion_electoral', 'casilla', 'distrito',
+        // Geo
+        'latitud', 'longitud', 'lat', 'lon', 'lng',
+        // Electoral (resultados)
+        'pan', 'pri', 'prd', 'morena', 'pvem', 'pt', 'mc', 'naem', 'pes', 'rsp', 'fxm',
+        'votos', 'lista_nominal', 'total_votos', 'votos_validos', 'participacion',
+        'candidato', 'siglas', 'votacion', 'porcentaje', 'porcentual', 'margen',
+        'coalicion', 'candidatura', 'cand-ind1',
+        // Varios
+        'telefono', 'email', 'fecha_alta', 'fecha_nacimiento', 'sexo', 'genero',
+        'id_distrito_local',
     ];
 
     public function __construct(ConnectionInterface $db, PadronMapperService $mapper)
@@ -43,25 +61,25 @@ class PadronImportService
         }
 
         $builder = $this->db->table($tabla);
-        $resumen = ['procesados' => 0, 'errores' => 0];
+        $resumen = ['procesados' => 0, 'errores' => 0, 'omitidos' => 0];
         $batch   = [];
 
         $this->optimizarMysql();
 
         if (!file_exists($rutaArchivo)) {
-            throw new RuntimeException("Archivo CSV no encontrado");
+            throw new RuntimeException("Archivo CSV no encontrado: {$rutaArchivo}");
         }
 
         $handle = fopen($rutaArchivo, 'r');
         if (!$handle) {
-            throw new RuntimeException("No se pudo abrir el archivo CSV");
+            throw new RuntimeException("No se pudo abrir el archivo CSV.");
         }
 
         $headers = $this->detectarHeaders($handle);
-        log_message('debug', '[HEADERS] ' . json_encode($headers));
+
         if (!$headers) {
             fclose($handle);
-            throw new RuntimeException("CSV sin encabezados o archivo vacío.");
+            throw new RuntimeException("CSV sin encabezados válidos o archivo vacío.");
         }
 
         $numHeaders = count($headers);
@@ -69,20 +87,38 @@ class PadronImportService
         try {
             while (($fila = fgetcsv($handle, 0, ',', '"', '\\')) !== false) {
 
-                if (empty(array_filter($fila, fn($v) => trim((string)$v) !== ''))) continue;
-
-                if (count($fila) !== $numHeaders) {
-                    $fila = array_pad(array_slice($fila, 0, $numHeaders), $numHeaders, '');
+                // Saltar filas completamente vacías
+                if (empty(array_filter($fila, fn($v) => trim((string)$v) !== ''))) {
+                    $resumen['omitidos']++;
+                    continue;
                 }
 
-                $data     = array_combine($headers, $fila);
+                // Alinear fila con headers (rellenar o truncar)
+                $filaAlineada = $this->alinearFila($fila, $numHeaders);
+                $data         = array_combine($headers, $filaAlineada);
+
                 $registro = $this->mapper->mapear($data, $uuidCatalogo);
 
-                if ($registro['nombre_completo'] === 'SIN NOMBRE'
-                    && empty($registro['municipio'])
-                    && empty($registro['seccion'])
-                    && empty($registro['clave_unica'])
-                ) {
+                // ── Filtro de calidad ──────────────────────────────────────────
+                // Calcular "puntos de verdad" — campos estructurados con valor real
+                $puntosDeVerdad = 0;
+                if (!empty($registro['nombre_completo']) && $registro['nombre_completo'] !== 'SIN NOMBRE') $puntosDeVerdad += 2;
+                if (!empty($registro['municipio']))    $puntosDeVerdad += 2;
+                if (!empty($registro['clave_unica']) && $registro['estatus_duplicidad'] !== 'generado_por_sistema') $puntosDeVerdad += 2;
+                if (!empty($registro['seccion']))      $puntosDeVerdad++;
+                if (!empty($registro['codigo_postal'])) $puntosDeVerdad++;
+
+                // Contar campos en datos_generales con valor real
+                $numExtras = 0;
+                if ($registro['datos_generales']) {
+                    $extras    = json_decode($registro['datos_generales'], true) ?? [];
+                    $numExtras = count(array_filter($extras, fn($v) => trim((string)$v) !== ''));
+                }
+
+                // Descartar si: 0 puntos de verdad Y menos de 3 campos extras con valor
+                // Esto captura filas de totales, separadores, notas al pie, etc.
+                if ($puntosDeVerdad === 0 && $numExtras < 3) {
+                    $resumen['omitidos']++;
                     continue;
                 }
 
@@ -106,68 +142,122 @@ class PadronImportService
             $this->db->query("ROLLBACK");
             fclose($handle);
             $this->restaurarConfiguracionMysql();
-            throw new RuntimeException("Error cerca del registro #{$resumen['procesados']}: " . $e->getMessage());
+            throw new RuntimeException(
+                "Error cerca del registro #{$resumen['procesados']}: " . $e->getMessage()
+            );
         }
+
         fclose($handle);
         $this->restaurarConfiguracionMysql();
 
         return $resumen;
     }
 
+    // =========================================================
+    // DETECCIÓN DE HEADERS
+    // =========================================================
+
     /**
-     * Detecta la fila real de headers en el CSV.
+     * Busca la fila con más coincidencias de campos canónicos.
+     * Ventana de inspección: primeras 60 filas.
      *
-     * Estrategia:
-     * 1. Lee fila por fila contando coincidencias con campos canónicos.
-     * 2. La primera fila con ≥3 coincidencias ES el header — para ahí.
-     * 3. Si ninguna fila tiene ≥3 coincidencias, usa la primera no vacía
-     *    (fallback para CSVs simples sin campos conocidos).
-     *
-     * El puntero queda exactamente DESPUÉS de la fila de headers,
-     * listo para leer datos.
+     * Mejoras respecto a la versión anterior:
+     * - Normalización más agresiva (tildes, guiones, espacios múltiples)
+     * - Score parcial: coincidencia de subcadena también cuenta (peso 0.5)
+     * - Fallback mejorado: usa la primera fila con ≥2 celdas no vacías
      */
     private function detectarHeaders($handle): ?array
     {
         rewind($handle);
 
-        $primeraFila = null;
-        $primeraPos  = null;
+        $mejorFila      = null;
+        $mejorScore     = -1;
+        $posTrasMejor   = 0;
 
-        while (($fila = fgetcsv($handle, 0, ',', '"', '\\')) !== false) {
-            $posTrasFila = ftell($handle);
-            $filaNorm    = $this->normalizarHeaders($fila);
-            $noVacias    = array_filter($filaNorm, fn($v) => $v !== '');
+        $primeraFilaNoVacia = null;
+        $posTrasPrimera     = 0;
 
-            if (empty($noVacias)) continue;
+        $filasEscaneadas = 0;
+        $maxEscaneo      = 60;
 
-            // Guardar primera fila no vacía como fallback
-            if ($primeraFila === null) {
-                $primeraFila = $filaNorm;
-                $primeraPos  = $posTrasFila;
+        while ($filasEscaneadas < $maxEscaneo
+            && ($fila = fgetcsv($handle, 0, ',', '"', '\\')) !== false) {
+
+            $posActual = ftell($handle);
+            $filaNorm  = $this->normalizarHeaders($fila);
+            $noVacias  = array_filter($filaNorm, fn($v) => trim((string)$v) !== '');
+
+            if (empty($noVacias)) {
+                $filasEscaneadas++;
+                continue;
             }
 
-            // Contar coincidencias con campos canónicos
-            $score = 0;
+            if ($primeraFilaNoVacia === null) {
+                $primeraFilaNoVacia = $filaNorm;
+                $posTrasPrimera     = $posActual;
+            }
+
+            $score = 0.0;
             foreach ($filaNorm as $celda) {
+                $celda = trim($celda);
+                if ($celda === '') continue;
+
+                // Coincidencia exacta → peso 1
                 if (in_array($celda, $this->camposCanonicos, true)) {
-                    $score++;
+                    $score += 1.0;
+                    continue;
+                }
+
+                // Coincidencia parcial → peso 0.4
+                foreach ($this->camposCanonicos as $canon) {
+                    if (str_contains($celda, $canon) || str_contains($canon, $celda)) {
+                        $score += 0.4;
+                        break;
+                    }
                 }
             }
 
-            // ≥3 coincidencias = esta fila ES el header con certeza
-            if ($score >= 3) {
-                // El puntero ya está después de esta fila — perfecto
-                return $this->hacerHeadersUnicos($filaNorm);
+            if ($score > $mejorScore && $score >= 1.5) {
+                $mejorScore   = $score;
+                $mejorFila    = $filaNorm;
+                $posTrasMejor = $posActual;
             }
+
+            $filasEscaneadas++;
         }
 
-        // Fallback: usar primera fila (CSVs simples sin campos conocidos)
-        if ($primeraFila !== null) {
-            fseek($handle, $primeraPos);
-            return $this->hacerHeadersUnicos($primeraFila);
+        if ($mejorFila !== null) {
+            fseek($handle, $posTrasMejor);
+            return $this->hacerHeadersUnicos($mejorFila);
+        }
+
+        if ($primeraFilaNoVacia !== null) {
+            fseek($handle, $posTrasPrimera);
+            return $this->hacerHeadersUnicos($primeraFilaNoVacia);
         }
 
         return null;
+    }
+
+    // =========================================================
+    // HELPERS
+    // =========================================================
+
+    /**
+     * Alinea la fila de datos con el número de headers.
+     * - Si hay más columnas que headers: truncar (datos extra se pierden)
+     * - Si hay menos columnas que headers: rellenar con vacíos
+     *
+     * Esto soluciona el "desface de celdas" cuando hay columnas combinadas.
+     */
+    private function alinearFila(array $fila, int $numHeaders): array
+    {
+        $len = count($fila);
+        if ($len === $numHeaders) return $fila;
+        if ($len > $numHeaders)  return array_slice($fila, 0, $numHeaders);
+
+        // Rellenar con vacíos
+        return array_merge($fila, array_fill(0, $numHeaders - $len, ''));
     }
 
     private function insertBatchSeguro($builder, array $datos): void
@@ -188,7 +278,8 @@ class PadronImportService
         $conteo = [];
         $unicos = [];
         foreach ($headers as $h) {
-            $h = ($h === '' || is_numeric($h)) ? 'columna' : $h;
+            $h = (trim($h) === '' || is_numeric($h)) ? 'columna' : trim($h);
+            $h = preg_replace('/\s+/', ' ', $h); // Normalizar espacios múltiples
             if (isset($conteo[$h])) {
                 $conteo[$h]++;
                 $unicos[] = $h . '_' . $conteo[$h];
@@ -204,10 +295,22 @@ class PadronImportService
     {
         $resultado = [];
         foreach ($headers as $header) {
-            $h = mb_convert_encoding((string)($header ?? ''), 'UTF-8', 'UTF-8, ISO-8859-1, Windows-1252');
+            $h = mb_convert_encoding(
+                (string)($header ?? ''),
+                'UTF-8',
+                'UTF-8, ISO-8859-1, Windows-1252'
+            );
             $h = preg_replace('/[\x00-\x1F\x7F]/u', '', $h);
-            $h = str_replace("\xEF\xBB\xBF", '', $h);
-            $resultado[] = mb_strtolower(trim((string)$h));
+            $h = str_replace("\xEF\xBB\xBF", '', $h);     // BOM
+            $h = mb_strtolower(trim($h));
+            $h = preg_replace('/\s+/', '_', $h);            // espacios → guión bajo
+            // Quitar tildes para matching
+            $h = strtr($h, [
+                'á'=>'a','é'=>'e','í'=>'i','ó'=>'o','ú'=>'u',
+                'ä'=>'a','ë'=>'e','ï'=>'i','ö'=>'o','ü'=>'u',
+                'ñ'=>'n','ç'=>'c',
+            ]);
+            $resultado[] = $h;
         }
         return $resultado;
     }

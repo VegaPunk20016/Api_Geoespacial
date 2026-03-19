@@ -39,7 +39,8 @@ class Services extends BaseService
             $tableService,
             $importService,
             $converterService,
-            $cache
+            $cache,
+            $mapper
         );
     }
 }

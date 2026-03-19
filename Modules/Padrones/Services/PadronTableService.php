@@ -28,6 +28,7 @@ class PadronTableService
             'clave_unica'        => ['type' => 'VARCHAR', 'constraint' => 100,    'null' => true],
             'nombre_completo'    => ['type' => 'VARCHAR', 'constraint' => 255],
             'municipio'          => ['type' => 'VARCHAR', 'constraint' => 255,    'null' => true],
+            'codigo_postal'      => ['type' => 'VARCHAR', 'constraint' => 10,     'null' => true], 
             'seccion'            => ['type' => 'VARCHAR', 'constraint' => 255,    'null' => true],
             'latitud'            => ['type' => 'DECIMAL', 'constraint' => '10,7', 'null' => true],
             'longitud'           => ['type' => 'DECIMAL', 'constraint' => '11,7', 'null' => true],
@@ -49,6 +50,7 @@ class PadronTableService
         $this->forge->addKey('clave_unica');
         $this->forge->addKey('nombre_completo');
         $this->forge->addKey('municipio');
+        $this->forge->addKey('codigo_postal'); // <-- ÍNDICE PARA BÚSQUEDAS POR CP
         $this->forge->addKey('seccion');
         $this->forge->addKey(['latitud', 'longitud']);
         $this->forge->addKey(['municipio', 'latitud', 'longitud']);
@@ -73,7 +75,7 @@ class PadronTableService
         }
     }
 
-   public function optimizarIndices(string $tabla): void
+    public function optimizarIndices(string $tabla): void
     {
         if (!$this->db->tableExists($tabla)) {
             return;
@@ -81,14 +83,15 @@ class PadronTableService
 
         $tablaSegura = $this->db->escapeIdentifier($tabla);
 
+        // Obtenemos los índices actuales para evitar duplicados
         $indicesExistentes = array_column(
             $this->db->query("SHOW INDEX FROM {$tablaSegura}")->getResultArray(),
             'Key_name'
         );
 
-        // Se agregan los índices compuestos necesarios para consultas espaciales
         $indicesNecesarios = [
             'idx_mun'     => "ALTER TABLE {$tablaSegura} ADD INDEX idx_mun (municipio)",
+            'idx_cp'      => "ALTER TABLE {$tablaSegura} ADD INDEX idx_cp (codigo_postal)", // <-- NUEVO ÍNDICE
             'idx_seccion' => "ALTER TABLE {$tablaSegura} ADD INDEX idx_seccion (seccion)",
             'idx_clave'   => "ALTER TABLE {$tablaSegura} ADD INDEX idx_clave (clave_unica)",
             'idx_geo'     => "ALTER TABLE {$tablaSegura} ADD INDEX idx_geo (latitud, longitud)",

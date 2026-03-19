@@ -17,4 +17,9 @@ interface PadronServiceInterface
     public function buscarMunicipios(string $id, string $termino): array;
     public function obtenerResumenAgnostico(string $id, ?string $municipio = null): array;
     public function eliminarPadron(string $idPadron, bool $permanente = false): bool;
+    public function guardarBeneficiario(string $padronId, array $datosFijos, array $datosGenerales = []): array;
+    public function actualizarBeneficiario(string $padronId, string $beneficiarioId, array $datosFijos, array $datosGenerales = []): bool;
+    public function eliminarBeneficiario(string $padronId, string $beneficiarioId): bool;
+    public function buscarPorCodigoPostal(string $idPadron, string $cp, int $limit = 1000): array;
+    public function obtenerPlantillaCampos(string $id): array;
 }
