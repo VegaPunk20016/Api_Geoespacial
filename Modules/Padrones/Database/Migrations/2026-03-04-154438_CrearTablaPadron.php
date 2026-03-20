@@ -21,25 +21,34 @@ class CrearTablaCatalogoPadrones extends Migration
                 'type' => 'TEXT',
                 'null' => true,
             ],
+            'entidad_federativa' => [
+                'type'       => 'VARCHAR',
+                'constraint' => '100',
+            ],
             'categoria' => [
                 'type'       => 'VARCHAR',
                 'constraint' => 50,
                 'default'    => 'General',
-                'after'      => 'entidad_federativa', // Esto la posiciona visualmente donde pediste
             ],
             'clave_interna' => [
                 'type'       => 'VARCHAR',
                 'constraint' => '50',
                 'null'       => true,
             ],
-            'entidad_federativa' => [
-                'type'       => 'VARCHAR',
-                'constraint' => '100',
-            ],
             'nombre_tabla_destino' => [
                 'type'       => 'VARCHAR',
                 'constraint' => '100',
                 'unique'     => true,
+            ],
+            'plantilla_mapeo' => [
+                'type' => 'JSON', 
+                'null' => true,   
+            ],
+            'formato_esperado' => [
+                'type'       => 'VARCHAR',
+                'constraint' => 10,
+                'null'       => true,
+                'default'    => null,
             ],
             'created_at' => ['type' => 'DATETIME', 'null' => true],
             'updated_at' => ['type' => 'DATETIME', 'null' => true],

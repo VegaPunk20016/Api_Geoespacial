@@ -6,212 +6,205 @@ use Ramsey\Uuid\Uuid;
 
 class PadronMapperService
 {
-    // ── Patrones para campos canónicos ────────────────────────────────────────
-
-    private string $reClave = '/^(clee|curp|rfc|rfc_empresa|folio|folio_id|folio_ctrl|num_folio|
-        folio_beneficiario|id|id_unico|id_beneficiario|id_registro|id_persona|clave|clave_unica|
-        clave_elector|clave_interna|clave_padron|matricula|num_matricula|expediente|num_expediente|
-        registro|num_registro|num_beneficiario|nss|imss|issste|cuenta|num_cuenta)$/xi';
-
-    private string $reNombre = '/^(nombre_completo|nombre_y_apellidos|nombre_beneficiario|
-        nombre_establecimiento|nombre_empresa|nombre_negocio|nom_estab|razon_social|razon|
-        denominacion|beneficiario|cliente|usuario|titular|propietario|representante)$/xi';
-
-    private string $reNombreSolo = '/^(nombre|nombres|primer_nombre|name)$/xi';
-    private string $rePaterno    = '/^(paterno|apellido_paterno|apellido_1|ap_pat|primer_apellido|last_name)$/xi';
-    private string $reMaterno    = '/^(materno|apellido_materno|apellido_2|ap_mat|segundo_apellido)$/xi';
-
-    private string $reMunicipio = '/^(municipio|municipio_nombre|nom_mun|nombre_municipio|
-        cve_mun|c_mnpio|cvemun)$/xi';
-
-    private string $reCP = '/^(cod_postal|codigo_post|cp|c_p|codigo_postal|cod_post|
-        zip_code|zip|postal_code|c\.p\.)$/xi';
-
-    private string $reSeccion = '/^(seccion|seccion_electoral|num_seccion|cve_seccion)$/xi';
-
-    private string $reLatitud  = '/^(latitud|lat|latitude|coord_lat|y_coord|coordenada_y|geo_lat)$/xi';
-    private string $reLongitud = '/^(longitud|lon|lng|longitude|coord_lon|x_coord|coordenada_x|geo_lon)$/xi';
-
-    /**
-     * Campos que se guardan en datos_generales pero NO como campos fijos.
-     * Para padrones electorales: partidos, coaliciones, estadísticas.
-     * Se guardan limpios, sin convertirse en campos estructurados.
-     */
-    private array $camposElectorales = [
-        'pan', 'pri', 'prd', 'pt', 'pvem', 'mc', 'morena', 'naem', 'pes', 'rsp', 'fxm',
-        'votos', 'votos_validos', 'votos_nulos', 'votos_no_registrados', 'total_votos',
-        'lista_nominal', 'total_de_secciones', 'total_de_casillas',
-        'participacion_ciudadana', 'participacion',
-        'siglas', 'votacion', 'porcentaje', 'porcentual',
-        'margen_de_victoria', 'margen',
-        'ruta_acta', 'ruta acta',
+    // =========================
+    // CAMPOS FIJOS
+    // =========================
+    private array $camposFijos = [
+        'clave_unica',
+        'nombre_completo',
+        'municipio',
+        'codigo_postal',
+        'seccion',
+        'latitud',
+        'longitud'
     ];
 
-    // Columnas completamente inútiles que se descartan (no van ni al JSON)
-    private array $camposDescartables = [
-        'columna', 'column', 'sin_nombre', 'unnamed', 'unnamed:',
-        'total', // solo si es un campo de totales genérico sin contexto
-    ];
+    // =========================
+    // REGEX AUTO-DETECCIÓN
+    // =========================
+    private string $reClave = '/^(clee|curp|rfc|folio|id|clave|matricula|expediente|nss)$/xi';
+    private string $reNombre = '/^(nombre_completo|nombre|nombres|razon_social|beneficiario|titular)$/xi';
+    private string $rePaterno = '/^(apellido_paterno|paterno|ap_pat)$/xi';
+    private string $reMaterno = '/^(apellido_materno|materno|ap_mat)$/xi';
+    private string $reMunicipio = '/^(municipio|nom_mun)$/xi';
+    private string $reCP = '/^(cp|codigo_postal|c_p)$/xi';
+    private string $reSeccion = '/^(seccion)$/xi';
+    private string $reLat = '/^(latitud|lat)$/xi';
+    private string $reLng = '/^(longitud|lon|lng)$/xi';
 
-    public function mapear(array $fila, string $uuidCatalogo): array
+    private array $basura = ['columna', 'unnamed', 'total'];
+
+    // =========================================================
+    // AUTO MAPPING (INTELIGENTE)
+    // =========================================================
+    public function mapear(array $fila, string $uuid): array
     {
-        $registro = [
-            'id'                 => Uuid::uuid7()->toString(),
-            'catalogo_padron_id' => $uuidCatalogo,
-            'clave_unica'        => null,
-            'nombre_completo'    => 'SIN NOMBRE',
-            'municipio'          => null,
-            'codigo_postal'      => null,
-            'seccion'            => null,
-            'latitud'            => null,
-            'longitud'           => null,
-            'estatus_duplicidad' => 'limpio',
-            'created_at'         => date('Y-m-d H:i:s'),
-        ];
+        $registro = $this->base($uuid);
 
-        $extra          = [];
-        $clee           = null;
-        $nom_estab      = null;
-        $partesNombre   = ['n' => '', 'p' => '', 'm' => ''];
-        $prioridadClave = null;
+        $extra = [];
+        $partes = ['n'=>'','p'=>'','m'=>''];
+        $claveDetectada = null;
 
-        foreach ($fila as $col => $valor) {
-            // ── Normalizar encoding ────────────────────────────────────────────
-            $colUtf8   = mb_convert_encoding((string)$col,   'UTF-8', 'UTF-8, ISO-8859-1, Windows-1252');
-            $valorUtf8 = mb_convert_encoding((string)$valor, 'UTF-8', 'UTF-8, ISO-8859-1, Windows-1252');
+        foreach ($fila as $col => $val) {
 
-            $valorLimpio = trim(preg_replace('/[\x00-\x1F\x7F]/', '', $valorUtf8));
-            $colLimpia   = mb_strtolower(trim(str_replace("\xEF\xBB\xBF", '', $colUtf8)));
+            $col = $this->normalizar($col);
+            $val = $this->limpiarValor($val);
 
-            // Normalizar espacios múltiples en el nombre de columna
-            $colLimpia = preg_replace('/\s+/', ' ', $colLimpia);
-            // Versión con guiones bajos (para matching)
-            $colSnake  = str_replace([' ', '-'], '_', $colLimpia);
+            if ($val === '' || $this->esBasura($col)) continue;
 
-            // ── Descartar columnas sin nombre real ─────────────────────────────
-            if ($colLimpia === '' || preg_match('/^columna_?\d*$/', $colSnake)) {
-                // Solo guardar en extra si tiene valor (puede ser útil)
-                if ($valorLimpio !== '') {
-                    $extra["col_{$colLimpia}"] = $valorLimpio;
+            $esFijo = false;
+
+            if (preg_match($this->reClave, $col)) {
+                if (!$claveDetectada) $claveDetectada = $val;
+                $esFijo = true;
+
+            } elseif (preg_match($this->reNombre, $col)) {
+                if ($registro['nombre_completo'] === 'SIN NOMBRE') {
+                    $registro['nombre_completo'] = $val;
                 }
-                continue;
+                $esFijo = true;
+
+            } elseif (preg_match($this->rePaterno, $col)) {
+                $partes['p'] = $val; $esFijo = true;
+
+            } elseif (preg_match($this->reMaterno, $col)) {
+                $partes['m'] = $val; $esFijo = true;
+
+            } elseif (preg_match($this->reMunicipio, $col)) {
+                $registro['municipio'] = $val; $esFijo = true;
+
+            } elseif (preg_match($this->reCP, $col)) {
+                $registro['codigo_postal'] = $val; $esFijo = true;
+
+            } elseif (preg_match($this->reSeccion, $col)) {
+                $registro['seccion'] = $val; $esFijo = true;
+
+            } elseif (preg_match($this->reLat, $col)) {
+                $registro['latitud'] = $this->toFloat($val); $esFijo = true;
+
+            } elseif (preg_match($this->reLng, $col)) {
+                $registro['longitud'] = $this->toFloat($val); $esFijo = true;
             }
 
-            // ── Mapeo de campos estructurados ──────────────────────────────────
-
-            if ($colSnake === 'clee') {
-                $clee = mb_substr($valorLimpio, 0, 100);
-                continue;
-            }
-
-            if ($colSnake === 'nom_estab') {
-                $nom_estab = mb_substr($valorLimpio, 0, 255);
-                continue;
-            }
-
-            // ID Municipio (campo especial para resultados electorales)
-            if (in_array($colSnake, ['id_municipio', 'id municipio'], true)) {
-                if ($valorLimpio !== '') $extra[$colUtf8] = $valorLimpio;
-                continue;
-            }
-
-            if ($valorLimpio !== '') {
-                if (preg_match($this->reClave, $colSnake)) {
-                    if ($prioridadClave === null) $prioridadClave = mb_substr($valorLimpio, 0, 100);
-                    continue;
-                }
-
-                if (preg_match($this->reNombre, $colSnake)) {
-                    if ($registro['nombre_completo'] === 'SIN NOMBRE' && $nom_estab === null) {
-                        $registro['nombre_completo'] = mb_substr($valorLimpio, 0, 255);
-                    }
-                    continue;
-                }
-
-                if (preg_match($this->reNombreSolo, $colSnake)) {
-                    $partesNombre['n'] = $valorLimpio;
-                    continue;
-                }
-
-                if (preg_match($this->rePaterno, $colSnake)) {
-                    $partesNombre['p'] = $valorLimpio;
-                    continue;
-                }
-
-                if (preg_match($this->reMaterno, $colSnake)) {
-                    $partesNombre['m'] = $valorLimpio;
-                    continue;
-                }
-
-                if (preg_match($this->reMunicipio, $colSnake)) {
-                    $registro['municipio'] = mb_substr($valorLimpio, 0, 255);
-                    continue;
-                }
-
-                if (preg_match($this->reCP, $colSnake)) {
-                    $registro['codigo_postal'] = mb_substr($valorLimpio, 0, 10);
-                    continue;
-                }
-
-                if (preg_match($this->reSeccion, $colSnake)) {
-                    $registro['seccion'] = mb_substr($valorLimpio, 0, 255);
-                    continue;
-                }
-
-                if (preg_match($this->reLatitud, $colSnake)) {
-                    $val = (float)str_replace(',', '.', $valorLimpio);
-                    $registro['latitud'] = ($val != 0) ? $val : null;
-                    continue;
-                }
-
-                if (preg_match($this->reLongitud, $colSnake)) {
-                    $val = (float)str_replace(',', '.', $valorLimpio);
-                    $registro['longitud'] = ($val != 0) ? $val : null;
-                    continue;
-                }
-            }
-
-            // ── Todo lo demás va al JSON ───────────────────────────────────────
-            // Incluye campos electorales, estadísticos, URLs, etc.
-            // Solo si tiene valor real
-            if ($valorLimpio !== '') {
-                // Usar el nombre original (con espacios) como clave del JSON para legibilidad
-                $claveJson = trim($colUtf8);
-                $extra[$claveJson] = $valorLimpio;
+            if (!$esFijo) {
+                $extra[$col] = $val;
             }
         }
 
-        // ── Cierre: nombre y clave ─────────────────────────────────────────────
-
-        if ($clee !== null) {
-            $registro['clave_unica'] = $clee;
-        } elseif ($prioridadClave !== null) {
-            $registro['clave_unica'] = $prioridadClave;
+        // Clave única
+        if ($claveDetectada) {
+            $registro['clave_unica'] = $claveDetectada;
         } else {
-            $registro['clave_unica']        = md5($uuidCatalogo . json_encode($extra));
+            ksort($extra);
+            $registro['clave_unica'] = md5($uuid . json_encode($extra));
             $registro['estatus_duplicidad'] = 'generado_por_sistema';
         }
 
-        if ($nom_estab !== null) {
-            $registro['nombre_completo'] = $nom_estab;
-        } elseif (
-            $registro['nombre_completo'] === 'SIN NOMBRE'
-            && ($partesNombre['n'] !== '' || $partesNombre['p'] !== '')
-        ) {
-            $registro['nombre_completo'] = trim(
-                "{$partesNombre['p']} {$partesNombre['m']} {$partesNombre['n']}"
-            );
+        // Nombre compuesto
+        if ($registro['nombre_completo'] === 'SIN NOMBRE') {
+            $nombre = trim("{$partes['p']} {$partes['m']} {$partes['n']}");
+            if ($nombre !== '') {
+                $registro['nombre_completo'] = $nombre;
+            } elseif (!empty($registro['municipio'])) {
+                $registro['nombre_completo'] = $registro['municipio'];
+            }
         }
 
-        // Para padrones electorales (sin nombre individual), usar municipio como identificador
-        if ($registro['nombre_completo'] === 'SIN NOMBRE' && !empty($registro['municipio'])) {
-            $registro['nombre_completo'] = $registro['municipio'];
-        }
-
-        $registro['datos_generales'] = !empty($extra)
-            ? json_encode($extra, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE)
-            : null;
+        $registro['datos_generales'] = $this->json($extra);
 
         return $registro;
+    }
+
+    // =========================================================
+    // MANUAL MAPPING (UI)
+    // =========================================================
+    public function mapearManual(array $fila, string $uuid, array $config): array
+    {
+        $registro = $this->base($uuid);
+        $extra = [];
+
+        foreach ($fila as $col => $val) {
+
+            $val = $this->limpiarValor($val);
+            $destino = $config[$col] ?? null;
+
+            if ($val === '' || !$destino) continue;
+
+            if (in_array($destino, $this->camposFijos)) {
+
+                if ($destino === 'latitud' || $destino === 'longitud') {
+                    $registro[$destino] = $this->toFloat($val);
+                } else {
+                    $registro[$destino] = mb_substr($val, 0, 255);
+                }
+
+            } else {
+                $extra[$destino] = $val;
+            }
+        }
+
+        if (empty($registro['clave_unica'])) {
+            ksort($extra);
+            $registro['clave_unica'] = md5($uuid . json_encode($extra));
+            $registro['estatus_duplicidad'] = 'generado_por_sistema';
+        }
+
+        $registro['datos_generales'] = $this->json($extra);
+
+        return $registro;
+    }
+
+    // =========================================================
+    // HELPERS
+    // =========================================================
+
+    private function base(string $uuid): array
+    {
+        return [
+            'id' => Uuid::uuid7()->toString(),
+            'catalogo_padron_id' => $uuid,
+            'clave_unica' => null,
+            'nombre_completo' => 'SIN NOMBRE',
+            'municipio' => null,
+            'codigo_postal' => null,
+            'seccion' => null,
+            'latitud' => null,
+            'longitud' => null,
+            'estatus_duplicidad' => 'limpio',
+            'created_at' => date('Y-m-d H:i:s'),
+        ];
+    }
+
+    private function limpiarValor($v): string
+    {
+        $v = mb_convert_encoding((string)$v, 'UTF-8', 'UTF-8, ISO-8859-1');
+        return trim(preg_replace('/[\x00-\x1F\x7F]/', '', $v));
+    }
+
+    private function normalizar($v): string
+    {
+        $v = mb_strtolower(trim((string)$v));
+        return str_replace([' ', '-'], '_', $v);
+    }
+
+    private function esBasura(string $col): bool
+    {
+        foreach ($this->basura as $b) {
+            if (str_contains($col, $b)) return true;
+        }
+        return false;
+    }
+
+    private function toFloat($v): ?float
+    {
+        $v = (float)str_replace(',', '.', $v);
+        return ($v != 0) ? $v : null;
+    }
+
+    private function json(array $data): ?string
+    {
+        return !empty($data)
+            ? json_encode($data, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE)
+            : null;
     }
 }

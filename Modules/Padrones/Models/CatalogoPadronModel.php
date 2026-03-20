@@ -8,10 +8,11 @@ use Modules\Padrones\Entities\CatalogoPadron;
 class CatalogoPadronModel extends Model
 {
     protected $table            = 'catalogo_padrones';
-    protected $primaryKey       = 'id';    
-    protected $useAutoIncrement = false;  
+    protected $primaryKey       = 'id';
+    protected $useAutoIncrement = false; 
     protected $returnType       = CatalogoPadron::class;
     protected $useSoftDeletes   = true;
+
     protected $allowedFields = [
         'id', 
         'nombre_padron', 
@@ -19,7 +20,10 @@ class CatalogoPadronModel extends Model
         'clave_interna', 
         'entidad_federativa', 
         'categoria', 
-        'nombre_tabla_destino'
+        'nombre_tabla_destino',
+        'plantilla_mapeo',
+        'formato_esperado' 
     ];
+
     protected $useTimestamps    = true;
 }

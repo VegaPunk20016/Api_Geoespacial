@@ -29,7 +29,6 @@ class Services extends BaseService
         $tableService   = new PadronTableService($forge, $db);
         $importService  = new PadronImportService($db, $mapper);
 
-        // Cache handler de CI4 — configurado para usar MySQL en app/Config/Cache.php
         $cache = \Config\Services::cache();
 
         return new PadronService(

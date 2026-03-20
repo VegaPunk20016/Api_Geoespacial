@@ -30,7 +30,6 @@ class PadronService implements PadronServiceInterface
     private const TTL_LISTA      = 600;
     private const TTL_RESUMEN    = 900;
 
-    // Límites para mapa (sin paginación)
     private const LIMIT_PUNTOS   = 5000;
     private const LIMIT_DEFAULT  = 1000;
     private const LIMIT_CLUSTERS = 2000;
@@ -94,16 +93,13 @@ class PadronService implements PadronServiceInterface
     }
 
     // =========================================================
-    // IMPORTAR CSV / XLSX
+    // IMPORTAR CSV / XLSX  (automático)
     // =========================================================
 
     public function procesarCargaMasiva(ImportCsvRequest $request): array
     {
         $padron = $this->catalogoModel->find($request->catalogo_padron_id);
-
-        if (!$padron) {
-            throw new RuntimeException("El padrón no existe.");
-        }
+        if (!$padron) throw new RuntimeException("El padrón no existe.");
 
         $rutaOriginal = $request->getTempPath();
         $extension    = $request->getExtensionOriginal();
@@ -124,6 +120,176 @@ class PadronService implements PadronServiceInterface
         return $resultado;
     }
 
+    // =========================================================
+    // PREVIEW — extrae headers + muestra sin importar nada
+    // =========================================================
+
+    public function previsualizarArchivo(ImportCsvRequest $request): array
+    {
+        $rutaOriginal = $request->getTempPath();
+        $extension    = strtolower($request->getExtensionOriginal());
+
+        // 1. Convertir a CSV limpio (elimina basura, filas vacías, etc.)
+        $rutaCsv = $this->converterService->prepararCsv($rutaOriginal, $extension);
+
+        $handle = fopen($rutaCsv, 'r');
+        if (!$handle) {
+            throw new RuntimeException("No se pudo abrir el archivo convertido.");
+        }
+
+        // 2. Detectar headers reales
+        $headers = $this->importService->extraerHeadersPublico($handle);
+
+        if (!$headers) {
+            fclose($handle);
+            if ($rutaCsv !== $rutaOriginal && file_exists($rutaCsv)) {
+                unlink($rutaCsv);
+            }
+            throw new RuntimeException("No se detectaron encabezados válidos.");
+        }
+
+        $muestra    = [];
+        $totalFilas = 0;
+        $maxMuestra = 10;
+        $numHeaders = count($headers);
+
+        // 3. Leer datos reales (ignorando filas vacías)
+        while (($fila = fgetcsv($handle, 0, ',', '"', '\\')) !== false) {
+
+            if (empty(array_filter($fila, fn($v) => trim((string)$v) !== ''))) {
+                continue;
+            }
+
+            $totalFilas++;
+
+            if (count($muestra) < $maxMuestra) {
+
+                // Alinear fila con headers (CRÍTICO)
+                $filaAlineada = array_slice(
+                    array_merge($fila, array_fill(0, $numHeaders, '')),
+                    0,
+                    $numHeaders
+                );
+
+                $muestra[] = array_combine($headers, $filaAlineada);
+            }
+        }
+
+        fclose($handle);
+
+        $previewKey = 'preview_' . md5($request->catalogo_padron_id . basename($rutaOriginal) . uniqid());
+        $rutaGuardada = sys_get_temp_dir() . '/' . $previewKey . '.csv';
+
+        if ($rutaCsv !== $rutaOriginal) {
+            rename($rutaCsv, $rutaGuardada);
+        } else {
+            copy($rutaCsv, $rutaGuardada);
+        }
+
+        return [
+            'headers'    => $headers,
+            'muestra'    => $muestra,
+            'totalFilas' => $totalFilas,
+            'previewKey' => $previewKey,
+            'extensionOriginal' => $extension,
+        ];
+    }
+
+    // =========================================================
+    // IMPORTAR CON MAPEO MANUAL DEL USUARIO
+    // =========================================================
+
+    public function importarConMapeoManual(string $padronId, array $mapeo): array
+    {
+        // 1. Buscar el padrón en el catálogo
+        $padron = $this->catalogoModel->find($padronId);
+        if (!$padron) {
+            throw new \RuntimeException("El padrón con ID {$padronId} no existe.");
+        }
+
+        // 2. Extraer metadatos y señales del frontend
+        $previewKey        = $mapeo['__previewKey__'] ?? null;
+        $filasIgnoradas    = $mapeo['__filasIgnoradas__'] ?? [];
+        $guardarPlantilla  = $mapeo['__guardarPlantilla__'] ?? false;
+        // 🔍 Capturamos la extensión original (enviada desde el frontend)
+        $extensionOriginal = $mapeo['__extensionOriginal__'] ?? null;
+
+        // 3. Limpiar el arreglo de mapeo para dejar solo las columnas reales de datos
+        unset($mapeo['__previewKey__']);
+        unset($mapeo['__filasIgnoradas__']);
+        unset($mapeo['__guardarPlantilla__']);
+        unset($mapeo['__extensionOriginal__']);
+
+        // 4. Localizar el archivo CSV temporal generado en la previsualización
+        $rutaCsv = null;
+        $esTemporal = false;
+
+        if ($previewKey) {
+            $rutaGuardada = sys_get_temp_dir() . DIRECTORY_SEPARATOR . $previewKey . '.csv';
+            if (file_exists($rutaGuardada)) {
+                $rutaCsv    = $rutaGuardada;
+                $esTemporal = true;
+            }
+        }
+
+        // Si el temporal no existe (por tiempo o limpieza de sistema), obligamos a re-subir
+        if (!$rutaCsv) {
+            throw new \RuntimeException("El archivo temporal ha expirado o no se encontró. Por favor, cargue el archivo nuevamente.");
+        }
+
+        // 5. Ejecutar la importación real a la tabla dinámica
+        $resultado = $this->importService->importarConMapeo(
+            $padron->nombre_tabla_destino,
+            $padronId,
+            $rutaCsv,
+            $mapeo,
+            $filasIgnoradas
+        );
+
+        // 6. 🔥 MEMORIA DE MAPEADO Y FORMATO (Acumulativo)
+        if ($guardarPlantilla === true || $guardarPlantilla === 'true' || $guardarPlantilla === 1) {
+
+            // A. Recuperamos la memoria actual (gracias al cast JSON en la Entity, esto es un array)
+            $plantillaActual = $padron->plantilla_mapeo ?? [];
+
+            // B. Normalizamos las llaves para mejorar la detección futura (columna_1 -> columna1)
+            $mapeoNormalizado = [];
+            foreach ($mapeo as $key => $value) {
+                if (empty($value)) continue;
+
+                // Guardamos la relación literal
+                $mapeoNormalizado[$key] = $value;
+
+                // Guardamos la versión normalizada para cruce entre formatos (CSV vs XLSX)
+                $keyNorm = preg_replace('/[^a-z0-9]/', '', strtolower($key));
+                if (!empty($keyNorm) && $keyNorm !== $key) {
+                    $mapeoNormalizado[$keyNorm] = $value;
+                }
+            }
+
+            // C. Combinamos sin sobrescribir lo que ya sabíamos (Acumulativo)
+            $padron->plantilla_mapeo = array_merge($plantillaActual, $mapeoNormalizado);
+
+            // D. Establecemos el formato oficial del padrón si aún no tiene uno
+            if (empty($padron->formato_esperado) && $extensionOriginal) {
+                // Guardamos la extensión original (xlsx, csv, etc.)
+                $padron->formato_esperado = strtolower($extensionOriginal);
+            }
+
+            // E. Persistimos los cambios en el catálogo
+            $this->catalogoModel->save($padron);
+        }
+
+        // 7. Limpieza post-importación del archivo temporal
+        if ($esTemporal && file_exists($rutaCsv)) {
+            unlink($rutaCsv);
+        }
+
+        // Invalidar cualquier caché de este padrón (mapas, totales, listas)
+        $this->invalidarCachePadron($padronId);
+
+        return $resultado;
+    }
     // =========================================================
     // OBTENER TODOS LOS PADRONES
     // =========================================================
@@ -165,7 +331,6 @@ class PadronService implements PadronServiceInterface
         $tieneBbox = isset($filtros['min_lat'], $filtros['max_lat'], $filtros['min_lng'], $filtros['max_lng'])
             && $filtros['min_lat'] !== null;
 
-        // ── Normalizar municipio ────────────────────────────────────────────
         $municipioFiltro = $filtros['municipio'] ?? $filtros['municipio_cvegeo'] ?? null;
         $municipio = ($municipioFiltro !== null && $municipioFiltro !== 'null' && $municipioFiltro !== '')
             ? trim($municipioFiltro)
@@ -173,13 +338,11 @@ class PadronService implements PadronServiceInterface
 
         $cp = isset($filtros['codigo_postal']) ? trim($filtros['codigo_postal']) : '';
 
-        // ── Paginación (solo modo tabla, nunca en mapa) ─────────────────────
         $paginar   = !$tieneBbox && isset($filtros['pagina']);
         $pagina    = max(1, (int)($filtros['pagina'] ?? 1));
         $porPagina = max(10, min(200, (int)($filtros['por_pagina'] ?? 50)));
         $offset    = ($pagina - 1) * $porPagina;
 
-        // ── Clave de caché ──────────────────────────────────────────────────
         if ($tieneBbox) {
             $p        = self::BBOX_PRECISION;
             $minLat   = round((float)$filtros['min_lat'], $p);
@@ -190,16 +353,15 @@ class PadronService implements PadronServiceInterface
             $cpSlug   = $cp ? '_cp' . $cp : '';
             $cacheKey = "bbox_{$id}_{$minLat}_{$maxLat}_{$minLng}_{$maxLng}{$munSlug}{$cpSlug}";
         } else {
-            $munSlug   = $municipio ? '_' . md5($municipio) : '';
-            $cpSlug    = $cp ? '_cp' . $cp : '';
+            $munSlug    = $municipio ? '_' . md5($municipio) : '';
+            $cpSlug     = $cp ? '_cp' . $cp : '';
             $paginaSlug = $paginar ? "_p{$pagina}x{$porPagina}" : '';
-            $cacheKey  = "beneficiarios_{$id}_default{$munSlug}{$cpSlug}{$paginaSlug}";
+            $cacheKey   = "beneficiarios_{$id}_default{$munSlug}{$cpSlug}{$paginaSlug}";
         }
 
         $cached = $this->cache->get($cacheKey);
         if ($cached !== null) return $cached;
 
-        // ── Query ───────────────────────────────────────────────────────────
         $this->modeloDinamico->setTable($padron->nombre_tabla_destino);
 
         $builder = $this->modeloDinamico->select(
@@ -216,7 +378,6 @@ class PadronService implements PadronServiceInterface
                 ->where('longitud <=', (float)$filtros['max_lng']);
         }
 
-        // TRIM+UPPER+LIKE para tolerar espacios, mayúsculas y sufijos en BD
         if ($municipio !== '') {
             $builder->where("UPPER(TRIM(municipio)) LIKE", '%' . strtoupper($municipio) . '%');
         }
@@ -226,7 +387,6 @@ class PadronService implements PadronServiceInterface
         }
 
         if ($paginar) {
-            // Contar total antes de aplicar LIMIT/OFFSET
             $total     = (clone $builder)->countAllResults(false);
             $registros = $builder->findAll($porPagina, $offset);
 
@@ -240,7 +400,6 @@ class PadronService implements PadronServiceInterface
                 ],
             ];
         } else {
-            // Mapa → límite fijo, sin paginación
             $registros = $builder->findAll($tieneBbox ? self::LIMIT_PUNTOS : self::LIMIT_DEFAULT);
             $respuesta = [
                 'data'       => $registros,
@@ -252,6 +411,22 @@ class PadronService implements PadronServiceInterface
         $this->registrarClaveCache($id, $cacheKey);
 
         return $respuesta;
+    }
+
+    // =========================================================
+    // DETALLE DE UN BENEFICIARIO
+    // =========================================================
+
+    public function obtenerDetalleBeneficiario(string $padronId, string $beneficiarioId): ?array
+    {
+        $padron = $this->catalogoModel->find($padronId);
+        if (!$padron) throw new \RuntimeException("El padrón solicitado no existe.");
+
+        $this->modeloDinamico->setTable($padron->nombre_tabla_destino);
+
+        return $this->modeloDinamico
+            ->select('id, clave_unica, nombre_completo, municipio, codigo_postal, seccion, latitud, longitud, datos_generales')
+            ->find($beneficiarioId);
     }
 
     // =========================================================
@@ -309,7 +484,6 @@ class PadronService implements PadronServiceInterface
                 ->where('longitud <=', (float)$filtros['max_lng']);
         }
 
-        // TRIM+UPPER+LIKE para clusters también
         if ($municipio !== '') {
             $builder->where("UPPER(TRIM(municipio)) LIKE", '%' . strtoupper($municipio) . '%');
         }
@@ -398,7 +572,6 @@ class PadronService implements PadronServiceInterface
 
         $tabla = $this->db->escapeIdentifier($padron->nombre_tabla_destino);
 
-        // CASO A: sin municipio → conteo global para coropletas
         if ($municipio === null) {
             $cacheKey = "coropletas_{$id}";
             $cached   = $this->cache->get($cacheKey);
@@ -425,7 +598,6 @@ class PadronService implements PadronServiceInterface
             return $resultado;
         }
 
-        // CASO B: análisis profundo de municipio — TRIM+UPPER+LIKE
         $municipio      = trim($municipio);
         $municipioUpper = strtoupper($municipio);
         $like           = '%' . $municipioUpper . '%';
@@ -579,6 +751,7 @@ class PadronService implements PadronServiceInterface
     // PLANTILLA DE CAMPOS (datos_generales)
     // =========================================================
 
+    // Una versión más "blindada" de tu lógica:
     public function obtenerPlantillaCampos(string $id): array
     {
         $padron = $this->catalogoModel->find($id);
@@ -586,23 +759,27 @@ class PadronService implements PadronServiceInterface
 
         $this->modeloDinamico->setTable($padron->nombre_tabla_destino);
 
-        $ultimo = $this->modeloDinamico
+        // Tomamos los últimos 10 para asegurar que pescamos una estructura completa
+        $muestras = $this->modeloDinamico
             ->where('datos_generales IS NOT NULL')
             ->orderBy('id', 'DESC')
-            ->first();
+            ->findAll(10);
 
-        if (!$ultimo || empty($ultimo['datos_generales'])) return [];
+        if (empty($muestras)) return [];
 
-        $data = json_decode($ultimo['datos_generales'], true);
+        $todasLasLlaves = [];
+        foreach ($muestras as $m) {
+            $json = json_decode($m['datos_generales'], true);
+            if (is_array($json)) {
+                $todasLasLlaves = array_merge($todasLasLlaves, $json);
+            }
+        }
 
-        $camposFijos = [
-            'id', 'catalogo_padron_id', 'clave_unica', 'nombre_completo',
-            'municipio', 'codigo_postal', 'seccion', 'latitud', 'longitud',
-            'datos_generales', 'estatus_duplicidad', 'created_at',
-        ];
-
+        // Limpiamos los valores para que regresen vacíos
         $plantilla = [];
-        foreach ($data as $llave => $valor) {
+        $camposFijos = ['id', 'catalogo_padron_id', 'clave_unica', 'nombre_completo', 'municipio', 'codigo_postal', 'seccion', 'latitud', 'longitud', 'datos_generales', 'estatus_duplicidad', 'created_at'];
+
+        foreach ($todasLasLlaves as $llave => $valor) {
             if (!in_array(strtolower($llave), $camposFijos)) {
                 $plantilla[$llave] = '';
             }
@@ -628,6 +805,7 @@ class PadronService implements PadronServiceInterface
 
     private function invalidarCachePadron(string $id): void
     {
+        $this->cache->delete('padrones_todos');
         $this->cache->delete("beneficiarios_{$id}_default");
         $this->cache->delete("coropletas_{$id}");
 

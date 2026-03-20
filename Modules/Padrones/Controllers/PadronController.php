@@ -12,10 +12,6 @@ use RuntimeException;
 
 class PadronController extends ResourceController
 {
-    /**
-     * Umbral de zoom a partir del cual se devuelven puntos reales.
-     * El frontend lee el campo `modo` de la respuesta — no necesita conocer este valor.
-     */
     private const ZOOM_UMBRAL_PUNTOS = 13;
 
     protected PadronServiceInterface $padronService;
@@ -32,7 +28,7 @@ class PadronController extends ResourceController
     public function index()
     {
         try {
-            $padrones = $this->padronService->obtenerTodosLosPadrones();
+                $padrones = $this->padronService->obtenerTodosLosPadrones();
             return $this->respond(['status' => 200, 'data' => $padrones]);
         } catch (Exception $e) {
             return $this->failServerError($e->getMessage());
@@ -61,7 +57,7 @@ class PadronController extends ResourceController
     // ============================================================
     // GET /api/padrones/{id}/beneficiarios
     //
-    // Modo tabla  → ?pagina=1&por_pagina=50  → paginación, devuelve { data, paginacion }
+    // Modo tabla  → ?pagina=1&por_pagina=50  → paginación
     // Modo mapa   → ?min_lat=...             → límite fijo, sin paginación
     // ============================================================
 
@@ -78,7 +74,6 @@ class PadronController extends ResourceController
                 'municipio'     => $this->request->getGet('municipio'),
                 'seccion'       => $this->request->getGet('seccion'),
                 'codigo_postal' => $this->request->getGet('codigo_postal'),
-                // Paginación — solo activa cuando el frontend manda ?pagina=N
                 'pagina'        => $this->request->getGet('pagina'),
                 'por_pagina'    => $this->request->getGet('por_pagina'),
             ];
@@ -131,8 +126,8 @@ class PadronController extends ResourceController
             if (!$padronId) return $this->failValidationErrors('El ID del padrón es obligatorio.');
 
             $json           = $this->request->getJSON(true);
-            $datosFijos     = $json['campos_fijos']     ?? $json;
-            $datosGenerales = $json['datos_generales']  ?? [];
+            $datosFijos     = $json['campos_fijos']    ?? $json;
+            $datosGenerales = $json['datos_generales'] ?? [];
 
             $nuevo = $this->padronService->guardarBeneficiario($padronId, $datosFijos, $datosGenerales);
 
@@ -145,7 +140,7 @@ class PadronController extends ResourceController
     }
 
     // ============================================================
-    // PATCH /api/padrones/{padronId}/beneficiarios/{beneficiarioId}
+    // PUT|PATCH /api/padrones/{padronId}/beneficiarios/{beneficiarioId}
     // ============================================================
 
     public function updateBeneficiario($padronId = null, $beneficiarioId = null)
@@ -281,10 +276,6 @@ class PadronController extends ResourceController
 
     // ============================================================
     // GET /api/padrones/{id}/clusters
-    //
-    // zoom >= ZOOM_UMBRAL_PUNTOS → puntos reales (hasta 5000)
-    // zoom <  ZOOM_UMBRAL_PUNTOS → clusters agrupados del servidor
-    // Responde { modo: 'puntos'|'clusters', data, total }
     // ============================================================
 
     public function getClusters($id = null)
@@ -303,7 +294,6 @@ class PadronController extends ResourceController
             ];
 
             if ($zoom >= self::ZOOM_UMBRAL_PUNTOS) {
-                // Puntos reales — sin paginación (modo mapa con BBOX)
                 $respuesta = $this->padronService->obtenerBeneficiarios($id, $filtros);
 
                 return $this->respond([
@@ -359,7 +349,7 @@ class PadronController extends ResourceController
     }
 
     // ============================================================
-    // POST /api/padrones/{id}/importar
+    // POST /api/padrones/{id}/importar  (importación automática)
     // ============================================================
 
     public function importCsv($padronId = null)
@@ -375,7 +365,8 @@ class PadronController extends ResourceController
 
             if (!$archivo->isValid()) {
                 return $this->failValidationErrors(
-                    'PHP bloqueó la carga. ' . $archivo->getErrorString() . ' (Código ' . $archivo->getError() . ')'
+                    'PHP bloqueó la carga. ' . $archivo->getErrorString() .
+                    ' (Código ' . $archivo->getError() . ')'
                 );
             }
 
@@ -390,6 +381,80 @@ class PadronController extends ResourceController
             return $this->respond([
                 'status'  => 200,
                 'message' => 'Carga masiva completada con éxito.',
+                'data'    => $resultado,
+            ]);
+        } catch (RuntimeException $e) {
+            return $this->failValidationErrors($e->getMessage());
+        } catch (Exception $e) {
+            return $this->failServerError('Error interno: ' . $e->getMessage());
+        }
+    }
+
+    // ============================================================
+    // POST /api/padrones/{id}/preview-csv
+    // Analiza el archivo y devuelve headers + muestra. No importa nada.
+    // ============================================================
+
+    public function previewCsv($padronId = null)
+    {
+        try {
+            if (!$padronId) return $this->failValidationErrors('ID requerido.');
+
+            $archivo = $this->request->getFile('archivo');
+
+            if (!$archivo || !$archivo->isValid()) {
+                return $this->failValidationErrors('Archivo inválido.');
+            }
+
+            $dto = new ImportCsvRequest($padronId, $archivo);
+
+            if (!$dto->isValid()) {
+                return $this->failValidationErrors('Formato no permitido. Solo CSV, TXT, XLSX y XLS.');
+            }
+
+            // Obtenemos los datos crudos del CSV
+            $data = $this->padronService->previsualizarArchivo($dto);
+
+            // 🔥 LA SOLUCIÓN DEFINITIVA 🔥
+            // Limpiamos todo el arreglo a UTF-8 válido antes de que CodeIgniter intente crear el JSON
+            $dataLimpia = $this->limpiarArregloUTF8($data);
+
+            return $this->respond(['status' => 200, 'data' => $dataLimpia]);
+        } catch (RuntimeException $e) {
+            return $this->failValidationErrors($e->getMessage());
+        } catch (Exception $e) {
+            return $this->failServerError('Error al analizar el archivo: ' . $e->getMessage());
+        }
+    }
+
+   // ============================================================
+    // POST /api/padrones/{id}/importar-mapeado
+    // Importa con el mapeo de columnas que define el usuario.
+    // ============================================================
+
+  public function importarConMapeo($padronId = null)
+    {
+        try {
+            if (!$padronId) return $this->failValidationErrors('ID requerido.');
+
+            // 1. Leemos el JSON directo que manda Vue
+            $json = $this->request->getJSON(true);
+            $mapeo = $json['mapeo'] ?? [];
+
+            if (empty($mapeo)) {
+                return $this->failValidationErrors('No se recibieron datos de mapeo.');
+            }
+
+            if (empty($mapeo['__previewKey__'])) {
+                return $this->failValidationErrors('Falta la referencia al archivo procesado (__previewKey__).');
+            }
+
+            // 2. Pasamos todo a tu servicio
+            $resultado = $this->padronService->importarConMapeoManual($padronId, $mapeo);
+
+            return $this->respond([
+                'status'  => 200,
+                'message' => 'Importación completada.',
                 'data'    => $resultado,
             ]);
         } catch (RuntimeException $e) {
@@ -422,5 +487,22 @@ class PadronController extends ResourceController
         } catch (Exception $e) {
             return $this->failServerError($e->getMessage());
         }
+    }
+
+    private function limpiarArregloUTF8($arreglo)
+    {
+        if (!is_array($arreglo)) {
+            return is_string($arreglo) ? mb_convert_encoding($arreglo, 'UTF-8', 'UTF-8, ISO-8859-1') : $arreglo;
+        }
+
+        $limpio = [];
+        foreach ($arreglo as $key => $value) {
+            // Limpiamos la llave (ej. nombres de columnas con acentos)
+            $llaveLimpia = is_string($key) ? mb_convert_encoding($key, 'UTF-8', 'UTF-8, ISO-8859-1') : $key;
+            // Limpiamos el valor de forma recursiva
+            $limpio[$llaveLimpia] = $this->limpiarArregloUTF8($value);
+        }
+        
+        return $limpio;
     }
 }

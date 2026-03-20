@@ -6,20 +6,11 @@ use RuntimeException;
 
 class FileConverterService
 {
-    /**
-     * Prepara un CSV limpio a partir de CSV o XLSX.
-     *
-     * Para XLSX: detecta automáticamente:
-     *   - Filas vacías al inicio (las salta)
-     *   - Headers multi-nivel (fusiona super-header + sub-header)
-     *   - Headers duplicados (añade sufijo)
-     *   - Columnas sin nombre (genera "columna_N")
-     */
     public function prepararCsv(string $rutaOriginal, string $extension): string
     {
         $ext = strtolower(trim($extension, '.'));
 
-        if ($ext === 'csv' || $ext === 'txt') {
+        if (in_array($ext, ['csv', 'txt'], true)) {
             return $rutaOriginal;
         }
 
@@ -30,70 +21,64 @@ class FileConverterService
         throw new RuntimeException("Formato no soportado: {$extension}");
     }
 
-    // =========================================================
-    // XLSX → CSV  (motor propio con PhpSpreadsheet si existe,
-    //               o con el lector nativo de ZIP/XML)
-    // =========================================================
-
     private function xlsxACsv(string $ruta): string
     {
-        // Intentar con PhpSpreadsheet si está disponible
         if (class_exists('\PhpOffice\PhpSpreadsheet\IOFactory')) {
             return $this->xlsxACsvConPhpSpreadsheet($ruta);
         }
 
-        // Fallback: leer ZIP/XML directamente (sin dependencias)
         return $this->xlsxACsvNativo($ruta);
     }
 
-    // ── PhpSpreadsheet (preferido) ────────────────────────────────────────────
+    // ================== PhpSpreadsheet ==================
     private function xlsxACsvConPhpSpreadsheet(string $ruta): string
     {
-        $spreadsheet = \PhpOffice\PhpSpreadsheet\IOFactory::load($ruta);
-        $ws          = $spreadsheet->getActiveSheet();
+        $reader = \PhpOffice\PhpSpreadsheet\IOFactory::createReaderForFile($ruta);
+        if (method_exists($reader, 'setReadDataOnly')) {
+            $reader->setReadDataOnly(true);
+        }
+
+        $spreadsheet = $reader->load($ruta);
+        $ws = $spreadsheet->getActiveSheet();
 
         $highRow = $ws->getHighestRow();
-        $highCol = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString(
-            $ws->getHighestColumn()
-        );
+        $highCol = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString($ws->getHighestColumn());
 
-        // 1. Detectar primera fila con datos reales
-        $primeraFilaDatos = $this->detectarPrimeraFilaConDatos($ws, $highRow, $highCol);
-        if ($primeraFilaDatos === null) {
+        $primeraFila = $this->detectarPrimeraFilaConDatos($ws, $highRow, $highCol);
+        if ($primeraFila === null) {
             throw new RuntimeException("El archivo XLSX no contiene datos.");
         }
 
-        // 2. Detectar si hay super-headers en la fila anterior
-        $filaHeaders    = $primeraFilaDatos;
+        // Detectar posible super-header
+        $filaHeaders = $primeraFila;
         $filaSuperHeader = null;
 
-        if ($primeraFilaDatos > 1) {
-            $filaAnterior = $primeraFilaDatos - 1;
-            $datosAnterior = $this->leerFila($ws, $filaAnterior, $highCol);
-            $noVaciosAnterior = array_filter($datosAnterior, fn($v) => trim($v) !== '');
+        if ($primeraFila > 1) {
+            $anterior = $this->leerFila($ws, $primeraFila - 1, $highCol);
+            $actual   = $this->leerFila($ws, $primeraFila, $highCol);
 
-            // Si la fila anterior tiene datos pero MENOS columnas con valor
-            // que la fila principal → es un super-header
-            $datosActual   = $this->leerFila($ws, $primeraFilaDatos, $highCol);
-            $noVaciosActual = array_filter($datosActual, fn($v) => trim($v) !== '');
+            $cntAnt = count(array_filter($anterior, fn($v) => trim($v) !== ''));
+            $cntAct = count(array_filter($actual, fn($v) => trim($v) !== ''));
 
-            if (count($noVaciosAnterior) > 0 && count($noVaciosAnterior) < count($noVaciosActual)) {
-                $filaSuperHeader = $filaAnterior;
+            if ($cntAnt > 0 && $cntAnt < $cntAct) {
+                $filaSuperHeader = $primeraFila - 1;
             }
         }
 
-        // 3. Construir headers fusionados
         $headers = $this->construirHeadersFusionados($ws, $filaSuperHeader, $filaHeaders, $highCol);
 
-        // 4. Escribir CSV
         $destino = sys_get_temp_dir() . '/padron_' . uniqid() . '.csv';
-        $handle  = fopen($destino, 'w');
-        fputcsv($handle, $headers);
+        $handle = fopen($destino, 'w');
+
+        fputcsv($handle, $headers, ",", "\"", "\\");
 
         for ($row = $filaHeaders + 1; $row <= $highRow; $row++) {
             $fila = $this->leerFila($ws, $row, $highCol);
+
             if ($this->filaEstaVacia($fila)) continue;
-            fputcsv($handle, $fila);
+            if ($this->esFilaBasura($fila)) continue;
+
+            fputcsv($handle, $fila, ",", "\"", "\\");
         }
 
         fclose($handle);
@@ -103,18 +88,17 @@ class FileConverterService
         return $destino;
     }
 
-    // ── Fallback nativo (sin dependencias) ────────────────────────────────────
+    // ================== Fallback Nativo ==================
     private function xlsxACsvNativo(string $ruta): string
     {
-        // XLSX es un ZIP con XML adentro
         $zip = new \ZipArchive();
         if ($zip->open($ruta) !== true) {
-            throw new RuntimeException("No se pudo abrir el archivo XLSX.");
+            throw new RuntimeException("No se pudo abrir el XLSX.");
         }
 
-        // Leer strings compartidos
         $sharedStrings = [];
         $ssXml = $zip->getFromName('xl/sharedStrings.xml');
+
         if ($ssXml) {
             $ss = new \SimpleXMLElement($ssXml);
             foreach ($ss->si as $si) {
@@ -130,49 +114,33 @@ class FileConverterService
             }
         }
 
-        // Leer primera hoja
-        $sheetXml = $zip->getFromName('xl/worksheets/sheet1.xml');
-        if (!$sheetXml) {
-            // Intentar con sheet2, sheet3...
-            for ($i = 2; $i <= 5; $i++) {
-                $sheetXml = $zip->getFromName("xl/worksheets/sheet{$i}.xml");
-                if ($sheetXml) break;
-            }
-        }
+        $sheetXml = $zip->getFromName('xl/worksheets/sheet1.xml')
+            ?: $zip->getFromName('xl/worksheets/sheet2.xml');
+
         $zip->close();
 
-        if (!$sheetXml) {
-            throw new RuntimeException("No se encontró la hoja de cálculo en el XLSX.");
-        }
-
-        // Parsear XML de la hoja
-        $xml   = new \SimpleXMLElement($sheetXml);
+        $xml = new \SimpleXMLElement($sheetXml);
         $filas = [];
 
         foreach ($xml->sheetData->row as $row) {
-            $rowIdx  = (int)$row['r'];
+            $rowIdx = (int)$row['r'];
             $filaArr = [];
-            $maxCol  = 0;
+            $maxCol = 0;
 
             foreach ($row->c as $cell) {
-                $ref     = (string)$cell['r'];
-                $colIdx  = $this->colLetraAIndice($ref) - 1;
-                $tipo    = (string)$cell['t'];
-                $valXml  = isset($cell->v) ? (string)$cell->v : '';
+                $colIdx = $this->colLetraAIndice((string)$cell['r']) - 1;
+                $valXml = isset($cell->v) ? (string)$cell->v : '';
+                $tipo = (string)$cell['t'];
 
-                if ($tipo === 's') {
-                    $valor = $sharedStrings[(int)$valXml] ?? '';
-                } elseif ($tipo === 'str' || $tipo === 'inlineStr') {
-                    $valor = isset($cell->is->t) ? (string)$cell->is->t : $valXml;
-                } else {
-                    $valor = $valXml;
-                }
+                $valor = ($tipo === 's')
+                    ? ($sharedStrings[(int)$valXml] ?? '')
+                    : $valXml;
 
-                $filaArr[$colIdx] = $valor;
+                $filaArr[$colIdx] = str_replace(["\r", "\n"], " ", trim((string)$valor));
+
                 if ($colIdx > $maxCol) $maxCol = $colIdx;
             }
 
-            // Rellenar huecos con cadena vacía
             $filaCompleta = [];
             for ($c = 0; $c <= $maxCol; $c++) {
                 $filaCompleta[] = $filaArr[$c] ?? '';
@@ -181,188 +149,113 @@ class FileConverterService
             $filas[$rowIdx] = $filaCompleta;
         }
 
-        if (empty($filas)) {
-            throw new RuntimeException("El archivo XLSX está vacío.");
-        }
+        ksort($filas);
 
-        // Detectar y fusionar headers
-        $allRows  = $filas;
-        $rowNums  = array_keys($allRows);
-        sort($rowNums);
-
-        // Buscar primera fila no vacía
         $primeraFila = null;
-        foreach ($rowNums as $rn) {
-            if (!$this->filaEstaVacia($allRows[$rn])) {
-                $primeraFila = $rn;
+        foreach ($filas as $idx => $fila) {
+            if (!$this->filaEstaVacia($fila)) {
+                $primeraFila = $idx;
                 break;
             }
         }
 
         if ($primeraFila === null) {
-            throw new RuntimeException("El XLSX no contiene datos.");
+            throw new RuntimeException("Archivo sin datos.");
         }
 
-        // Detectar super-header
-        $filaHeaders    = $primeraFila;
-        $filaSuperHeader = null;
+        $headers = $this->hacerHeadersUnicos($filas[$primeraFila]);
 
-        // Buscar fila anterior con datos (puede no ser $primeraFila-1 si hay gaps)
-        $idxPrimera = array_search($primeraFila, $rowNums);
-        if ($idxPrimera > 0) {
-            $filaAnteriorNum = $rowNums[$idxPrimera - 1];
-            $anterior  = $allRows[$filaAnteriorNum];
-            $actual    = $allRows[$primeraFila];
-            $cntAnt    = count(array_filter($anterior, fn($v) => trim($v) !== ''));
-            $cntAct    = count(array_filter($actual,   fn($v) => trim($v) !== ''));
-
-            if ($cntAnt > 0 && $cntAnt < $cntAct) {
-                $filaSuperHeader = $filaAnteriorNum;
-            }
-        }
-
-        $headers = $this->construirHeadersDesdeArrays(
-            $filaSuperHeader !== null ? $allRows[$filaSuperHeader] : null,
-            $allRows[$filaHeaders]
-        );
-
-        // Escribir CSV
         $destino = sys_get_temp_dir() . '/padron_' . uniqid() . '.csv';
-        $handle  = fopen($destino, 'w');
+        $handle = fopen($destino, 'w');
+
         fputcsv($handle, $headers);
 
-        foreach ($rowNums as $rn) {
-            if ($rn <= $filaHeaders) continue;
-            $fila = $allRows[$rn];
+        foreach ($filas as $idx => $fila) {
+            if ($idx <= $primeraFila) continue;
             if ($this->filaEstaVacia($fila)) continue;
+            if ($this->esFilaBasura($fila)) continue;
 
-            // Alinear longitud con headers
-            while (count($fila) < count($headers)) $fila[] = '';
-            fputcsv($handle, array_slice($fila, 0, count($headers)));
+            fputcsv($handle, $fila);
         }
 
         fclose($handle);
+
         return $destino;
     }
 
-    // =========================================================
-    // HELPERS
-    // =========================================================
+    // ================== Helpers ==================
 
-    /**
-     * Fusiona super-header + sub-header para construir nombres de columna únicos.
-     * 
-     * Lógica:
-     * - Si la columna tiene sub-header → usar sub-header
-     * - Si la columna NO tiene sub-header pero tiene super-header → usar super-header
-     * - Si hay duplicados → añadir sufijo incremental
-     * - Columnas completamente vacías → "columna_N"
-     *
-     * Para sub-headers duplicados bajo distintos super-headers:
-     *   "Siglas" bajo "CANDIDATO GANADOR"   → "CANDIDATO GANADOR - Siglas"
-     *   "Siglas" bajo "CANDIDATO 2DO LUGAR" → "CANDIDATO 2DO LUGAR - Siglas"
-     */
-    private function construirHeadersFusionados(
-        $ws,
-        ?int $filaSuperHeader,
-        int $filaHeaders,
-        int $maxCol
-    ): array {
-        $superActual = null;
-        $brutos      = [];
+    private function leerFila($ws, int $row, int $highCol): array
+    {
+        $fila = [];
 
-        for ($col = 1; $col <= $maxCol; $col++) {
-            $superVal = $filaSuperHeader
-                ? trim((string)$ws->getCellByColumnAndRow($col, $filaSuperHeader)->getValue())
-                : '';
-            $subVal   = trim((string)$ws->getCellByColumnAndRow($col, $filaHeaders)->getValue());
-
-            // Actualizar super-header activo cuando encontramos uno nuevo
-            if ($superVal !== '') $superActual = $superVal;
-
-            if ($subVal !== '') {
-                // Sub-header existe: si hay super-header activo Y es diferente al sub, combinar
-                if ($superActual && $superVal === '' && $subVal !== $superActual) {
-                    $brutos[] = "{$superActual} - {$subVal}";
-                } else {
-                    $brutos[] = $subVal;
-                    if ($superVal) $superActual = null; // nueva sección
-                }
-            } else {
-                // Sin sub-header: usar super-header o placeholder
-                $brutos[] = $superActual ?? "columna_{$col}";
-                $superActual = null;
-            }
+        for ($col = 1; $col <= $highCol; $col++) {
+            $valor = $ws->getCell([$col, $row])->getFormattedValue();
+            $fila[] = str_replace(["\r", "\n"], " ", trim((string)$valor));
         }
 
-        return $this->hacerHeadersUnicos($brutos);
+        return $fila;
     }
 
-    private function construirHeadersDesdeArrays(?array $superRow, array $subRow): array
+    private function construirHeadersFusionados($ws, ?int $filaSuperHeader, int $filaHeaders, int $maxCol): array
     {
-        $maxCol      = max(count($superRow ?? []), count($subRow));
+        $headers = [];
         $superActual = null;
-        $brutos      = [];
 
-        for ($i = 0; $i < $maxCol; $i++) {
-            $superVal = $superRow ? trim((string)($superRow[$i] ?? '')) : '';
-            $subVal   = trim((string)($subRow[$i] ?? ''));
+        for ($col = 1; $col <= $maxCol; $col++) {
 
-            if ($superVal !== '') $superActual = $superVal;
+            $superVal = $filaSuperHeader
+                ? trim((string)$ws->getCell([$col, $filaSuperHeader])->getValue())
+                : '';
+
+            $subVal = trim((string)$ws->getCell([$col, $filaHeaders])->getValue());
+
+            if ($superVal !== '') {
+                $superActual = $superVal;
+            }
 
             if ($subVal !== '') {
-                if ($superActual && $superVal === '' && $subVal !== $superActual) {
-                    $brutos[] = "{$superActual} - {$subVal}";
-                } else {
-                    $brutos[] = $subVal;
-                    if ($superVal) $superActual = null;
-                }
+                $headers[] = $superActual && $superVal === ''
+                    ? "{$superActual} - {$subVal}"
+                    : $subVal;
             } else {
-                $brutos[] = $superActual ?? "columna_" . ($i + 1);
-                $superActual = null;
+                $headers[] = $superActual ?? "columna_{$col}";
             }
         }
 
-        return $this->hacerHeadersUnicos($brutos);
+        return $this->hacerHeadersUnicos($headers);
     }
 
     private function hacerHeadersUnicos(array $headers): array
     {
         $conteo = [];
-        $unicos = [];
+        $resultado = [];
+
         foreach ($headers as $h) {
-            $h = (trim($h) === '' || is_numeric($h)) ? 'columna' : trim($h);
-            // Normalizar espacios múltiples dentro del nombre
+            $h = trim($h);
+            $h = ($h === '' || is_numeric($h)) ? 'columna' : $h;
             $h = preg_replace('/\s+/', ' ', $h);
+
             if (isset($conteo[$h])) {
                 $conteo[$h]++;
-                $unicos[] = $h . '_' . $conteo[$h];
+                $resultado[] = "{$h}_{$conteo[$h]}";
             } else {
                 $conteo[$h] = 1;
-                $unicos[] = $h;
+                $resultado[] = $h;
             }
         }
-        return $unicos;
+
+        return $resultado;
     }
 
     private function detectarPrimeraFilaConDatos($ws, int $highRow, int $highCol): ?int
     {
         for ($row = 1; $row <= min($highRow, 60); $row++) {
-            $fila = $this->leerFila($ws, $row, $highCol);
-            if (!$this->filaEstaVacia($fila)) return $row;
+            if (!$this->filaEstaVacia($this->leerFila($ws, $row, $highCol))) {
+                return $row;
+            }
         }
         return null;
-    }
-
-    private function leerFila($ws, int $row, int $highCol): array
-    {
-        $fila = [];
-        for ($col = 1; $col <= $highCol; $col++) {
-            $cell  = $ws->getCellByColumnAndRow($col, $row);
-            $valor = $cell->getFormattedValue();
-            $fila[] = trim((string)$valor);
-        }
-        return $fila;
     }
 
     private function filaEstaVacia(array $fila): bool
@@ -373,16 +266,37 @@ class FileConverterService
         return true;
     }
 
-    private function colLetraAIndice(string $cellRef): int
+    private function esFilaBasura(array $fila): bool
     {
-        // Extrae la parte de letras de una referencia como "AB12" → "AB" → índice
-        preg_match('/^([A-Z]+)/i', $cellRef, $m);
+        $primera = '';
+
+        foreach ($fila as $v) {
+            $v = trim((string)$v);
+            if ($v !== '') {
+                $primera = $v;
+                break;
+            }
+        }
+
+        if ($primera === '') return false;
+
+        return (
+            strtoupper($primera) === 'TOTAL' ||
+            str_starts_with($primera, '*') ||
+            str_starts_with($primera, '=')
+        );
+    }
+
+    private function colLetraAIndice(string $ref): int
+    {
+        preg_match('/^([A-Z]+)/i', $ref, $m);
         $letters = strtoupper($m[1] ?? 'A');
+
         $col = 0;
-        $len = strlen($letters);
-        for ($i = 0; $i < $len; $i++) {
+        for ($i = 0; $i < strlen($letters); $i++) {
             $col = $col * 26 + (ord($letters[$i]) - ord('A') + 1);
         }
+
         return $col;
     }
 }

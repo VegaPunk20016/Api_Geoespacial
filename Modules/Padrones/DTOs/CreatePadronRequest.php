@@ -9,6 +9,7 @@ class CreatePadronRequest
     public ?string $clave_interna;
     public string $entidad_federativa;
     public string $categoria; 
+    public ?string $formato_esperado; 
 
     public function __construct(object $jsonData)
     {
@@ -17,6 +18,7 @@ class CreatePadronRequest
         $this->clave_interna      = $jsonData->clave_interna ?? null;
         $this->entidad_federativa = $jsonData->entidad_federativa ?? '';
         $this->categoria          = $jsonData->categoria ?? 'General';
+        $this->formato_esperado   = $jsonData->formato_esperado ?? null; 
     }
 
     public function isValid(): bool
