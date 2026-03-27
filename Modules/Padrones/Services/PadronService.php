@@ -323,13 +323,17 @@ class PadronService implements PadronServiceInterface
     // Modo tabla → BBOX = false → paginación con pagina + por_pagina
     // =========================================================
 
-    public function obtenerBeneficiarios(string $id, array $filtros = []): array
+   public function obtenerBeneficiarios(string $id, array $filtros = []): array
     {
         $padron = $this->catalogoModel->find($id);
-        if (!$padron) throw new RuntimeException("El padrón solicitado no existe.");
+        if (!$padron) throw new \RuntimeException("El padrón solicitado no existe.");
 
-        $tieneBbox = isset($filtros['min_lat'], $filtros['max_lat'], $filtros['min_lng'], $filtros['max_lng'])
-            && $filtros['min_lat'] !== null;
+        $minLat = $filtros['min_lat'] ?? null;
+        $maxLat = $filtros['max_lat'] ?? null;
+        $minLng = $filtros['min_lng'] ?? null;
+        $maxLng = $filtros['max_lng'] ?? null;
+
+        $tieneBbox = ($minLat !== null && $maxLat !== null && $minLng !== null && $maxLng !== null);
 
         $municipioFiltro = $filtros['municipio'] ?? $filtros['municipio_cvegeo'] ?? null;
         $municipio = ($municipioFiltro !== null && $municipioFiltro !== 'null' && $municipioFiltro !== '')
@@ -343,15 +347,16 @@ class PadronService implements PadronServiceInterface
         $porPagina = max(10, min(200, (int)($filtros['por_pagina'] ?? 50)));
         $offset    = ($pagina - 1) * $porPagina;
 
+        // Construcción de llave de caché
         if ($tieneBbox) {
             $p        = self::BBOX_PRECISION;
-            $minLat   = round((float)$filtros['min_lat'], $p);
-            $maxLat   = round((float)$filtros['max_lat'], $p);
-            $minLng   = round((float)$filtros['min_lng'], $p);
-            $maxLng   = round((float)$filtros['max_lng'], $p);
+            $minLatR  = round((float)$minLat, $p);
+            $maxLatR  = round((float)$maxLat, $p);
+            $minLngR  = round((float)$minLng, $p);
+            $maxLngR  = round((float)$maxLng, $p);
             $munSlug  = $municipio ? '_' . md5($municipio) : '';
             $cpSlug   = $cp ? '_cp' . $cp : '';
-            $cacheKey = "bbox_{$id}_{$minLat}_{$maxLat}_{$minLng}_{$maxLng}{$munSlug}{$cpSlug}";
+            $cacheKey = "bbox_{$id}_{$minLatR}_{$maxLatR}_{$minLngR}_{$maxLngR}{$munSlug}{$cpSlug}";
         } else {
             $munSlug    = $municipio ? '_' . md5($municipio) : '';
             $cpSlug     = $cp ? '_cp' . $cp : '';
@@ -368,18 +373,19 @@ class PadronService implements PadronServiceInterface
             'id, clave_unica, nombre_completo, municipio, codigo_postal, seccion, latitud, longitud, datos_generales'
         );
 
+        // 🚀 MAGIA ESPACIAL: Filtrado a la velocidad de la luz usando el polígono de la pantalla
         if ($tieneBbox) {
-            $builder
-                ->where('latitud IS NOT NULL',  null, false)
-                ->where('longitud IS NOT NULL', null, false)
-                ->where('latitud >=',  (float)$filtros['min_lat'])
-                ->where('latitud <=',  (float)$filtros['max_lat'])
-                ->where('longitud >=', (float)$filtros['min_lng'])
-                ->where('longitud <=', (float)$filtros['max_lng']);
+            $minLatF = (float)$minLat;
+            $maxLatF = (float)$maxLat;
+            $minLngF = (float)$minLng;
+            $maxLngF = (float)$maxLng;
+            $envelope = "ST_MakeEnvelope(Point({$minLngF}, {$minLatF}), Point({$maxLngF}, {$maxLatF}))";
+            $builder->where("ST_Contains({$envelope}, geo_point)", null, false);
         }
 
+        // 🚀 BÚSQUEDA EXACTA: Usa los índices idx_mun y idx_cp de MySQL en lugar de escanear toda la tabla
         if ($municipio !== '') {
-            $builder->where("UPPER(TRIM(municipio)) LIKE", '%' . strtoupper($municipio) . '%');
+            $builder->where('municipio', $municipio);
         }
 
         if ($cp !== '') {
@@ -436,16 +442,20 @@ class PadronService implements PadronServiceInterface
     public function obtenerClusters(string $id, array $filtros = []): array
     {
         $padron = $this->catalogoModel->find($id);
-        if (!$padron) throw new RuntimeException("El padrón no existe.");
+        if (!$padron) throw new \RuntimeException("El padrón no existe.");
+
+        $minLat = $filtros['min_lat'] ?? null;
+        $maxLat = $filtros['max_lat'] ?? null;
+        $minLng = $filtros['min_lng'] ?? null;
+        $maxLng = $filtros['max_lng'] ?? null;
+
+        $tieneBbox = ($minLat !== null && $maxLat !== null && $minLng !== null && $maxLng !== null);
 
         $zoom = (int)($filtros['zoom'] ?? 10);
 
         if ($zoom <= 9)      $precision = 1;
         elseif ($zoom <= 11) $precision = 2;
         else                 $precision = 3;
-
-        $tieneBbox = isset($filtros['min_lat'], $filtros['max_lat'], $filtros['min_lng'], $filtros['max_lng'])
-            && $filtros['min_lat'] !== null;
 
         $municipioFiltro = $filtros['municipio'] ?? $filtros['municipio_cvegeo'] ?? null;
         $municipio = ($municipioFiltro !== null && $municipioFiltro !== 'null' && $municipioFiltro !== '')
@@ -456,10 +466,10 @@ class PadronService implements PadronServiceInterface
         $cacheKey = "clusters_{$id}_z{$zoom}{$munSlug}";
 
         if ($tieneBbox) {
-            $cacheKey .= '_' . round((float)$filtros['min_lat'], 1)
-                . '_' . round((float)$filtros['max_lat'], 1)
-                . '_' . round((float)$filtros['min_lng'], 1)
-                . '_' . round((float)$filtros['max_lng'], 1);
+            $cacheKey .= '_' . round((float)$minLat, 1)
+                . '_' . round((float)$maxLat, 1)
+                . '_' . round((float)$minLng, 1)
+                . '_' . round((float)$maxLng, 1);
         }
 
         $cached = $this->cache->get($cacheKey);
@@ -473,19 +483,19 @@ class PadronService implements PadronServiceInterface
             ->select('COUNT(id) AS count',                     false)
             ->select('MIN(nombre_completo) AS nombre_muestra', false)
             ->select('MIN(municipio) AS municipio',            false)
-            ->where('latitud IS NOT NULL',  null, false)
-            ->where('longitud IS NOT NULL', null, false);
+            ->where('latitud IS NOT NULL', null, false); // Ignora Null Island de forma rápida
 
         if ($tieneBbox) {
-            $builder
-                ->where('latitud >=',  (float)$filtros['min_lat'])
-                ->where('latitud <=',  (float)$filtros['max_lat'])
-                ->where('longitud >=', (float)$filtros['min_lng'])
-                ->where('longitud <=', (float)$filtros['max_lng']);
+            $minLatF = (float)$minLat;
+            $maxLatF = (float)$maxLat;
+            $minLngF = (float)$minLng;
+            $maxLngF = (float)$maxLng;
+            $envelope = "ST_MakeEnvelope(Point({$minLngF}, {$minLatF}), Point({$maxLngF}, {$maxLatF}))";
+            $builder->where("ST_Contains({$envelope}, geo_point)", null, false);
         }
 
         if ($municipio !== '') {
-            $builder->where("UPPER(TRIM(municipio)) LIKE", '%' . strtoupper($municipio) . '%');
+            $builder->where('municipio', $municipio);
         }
 
         $resultado = $builder
@@ -539,22 +549,24 @@ class PadronService implements PadronServiceInterface
     public function buscarMunicipios(string $id, string $termino): array
     {
         $padron = $this->catalogoModel->find($id);
-        if (!$padron) throw new RuntimeException("El padrón no existe.");
+        if (!$padron) throw new \RuntimeException("El padrón no existe.");
 
         $termino = trim($termino);
         if ($termino === '') return [];
 
         $tabla = $this->db->escapeIdentifier($padron->nombre_tabla_destino);
-        $like  = '%' . strtoupper($termino) . '%';
+        
+        // Dejamos que MySQL maneje las mayúsculas/minúsculas naturalmente
+        $like  = '%' . $termino . '%';
 
         return $this->db->query(
-            "SELECT   TRIM(municipio)  AS municipio_estandarizado,
-                      COUNT(id)        AS total_registros
+            "SELECT   municipio AS municipio_estandarizado,
+                      COUNT(id) AS total_registros
              FROM     {$tabla}
              WHERE    municipio IS NOT NULL
                AND    municipio != ''
-               AND    UPPER(TRIM(municipio)) LIKE ?
-             GROUP BY TRIM(municipio)
+               AND    municipio LIKE ?
+             GROUP BY municipio
              ORDER BY total_registros DESC
              LIMIT    10",
             [$like]
@@ -568,7 +580,7 @@ class PadronService implements PadronServiceInterface
     public function obtenerResumenAgnostico(string $id, ?string $municipio = null): array
     {
         $padron = $this->catalogoModel->find($id);
-        if (!$padron) throw new RuntimeException("Padrón no encontrado");
+        if (!$padron) throw new \RuntimeException("Padrón no encontrado");
 
         $tabla = $this->db->escapeIdentifier($padron->nombre_tabla_destino);
 
@@ -577,6 +589,7 @@ class PadronService implements PadronServiceInterface
             $cached   = $this->cache->get($cacheKey);
             if ($cached !== null) return $cached;
 
+            // Este bloque está excelente, es un escaneo necesario para colorear el mapa base
             $resultado = $this->db->table($tabla)
                 ->select('municipio, COUNT(id) AS total', false)
                 ->select('SUM(latitud IS NOT NULL AND longitud IS NOT NULL) > 0 AS tiene_coordenadas', false)
@@ -598,17 +611,19 @@ class PadronService implements PadronServiceInterface
             return $resultado;
         }
 
-        $municipio      = trim($municipio);
-        $municipioUpper = strtoupper($municipio);
-        $like           = '%' . $municipioUpper . '%';
-        $cacheKey       = "resumen_{$id}_" . md5($municipioUpper);
+        // ==========================================
+        // OPTIMIZACIÓN PARA MUNICIPIO ESPECÍFICO
+        // ==========================================
+        $municipio = trim($municipio);
+        $cacheKey  = "resumen_{$id}_" . md5($municipio);
 
         $cached = $this->cache->get($cacheKey);
         if ($cached !== null) return $cached;
 
+        // 🚀 BÚSQUEDA EXACTA: Aprovechamos al máximo el índice idx_mun
         $row = $this->db->table($tabla)
             ->select('datos_generales')
-            ->where("UPPER(TRIM(municipio)) LIKE", $like)
+            ->where('municipio', $municipio) // <-- ¡ADIÓS UPPER(TRIM(LIKE))!
             ->where('datos_generales IS NOT NULL', null, false)
             ->limit(1)
             ->get()
@@ -626,7 +641,7 @@ class PadronService implements PadronServiceInterface
 
         $builder = $this->db->table($tabla)
             ->select('COUNT(id) as total_registros', false)
-            ->where("UPPER(TRIM(municipio)) LIKE", $like);
+            ->where('municipio', $municipio); // <-- AQUÍ TAMBIÉN, BÚSQUEDA EXACTA
 
         foreach ($camposSumables as $campo) {
             $builder->selectSum(
@@ -651,60 +666,92 @@ class PadronService implements PadronServiceInterface
     // CRUD BENEFICIARIOS
     // =========================================================
 
-    public function guardarBeneficiario(string $padronId, array $datosFijos, array $datosGenerales = []): array
+   public function guardarBeneficiario(string $padronId, array $datosFijos, array $datosGenerales = []): array
     {
-        $padron = $this->obtenerPadronPorId($padronId);
+        $padron = $this->catalogoModel->find($padronId);
         if (!$padron) throw new \RuntimeException("Padrón no encontrado.");
 
         $this->modeloDinamico->setTable($padron->nombre_tabla_destino);
 
+        // Limpieza de lat/lng para no romper el índice espacial (ST_GeomFromText)
+        $lat = isset($datosFijos['latitud']) && $datosFijos['latitud'] !== '' ? (float)$datosFijos['latitud'] : null;
+        $lng = isset($datosFijos['longitud']) && $datosFijos['longitud'] !== '' ? (float)$datosFijos['longitud'] : null;
+
+        // Limpieza de CP
+        $cp = isset($datosFijos['codigo_postal']) ? preg_replace('/[^0-9A-Za-z]/', '', $datosFijos['codigo_postal']) : null;
+
         $registro = [
             'id'                 => \Ramsey\Uuid\Uuid::uuid7()->toString(),
             'catalogo_padron_id' => $padronId,
-            'nombre_completo'    => $datosFijos['nombre_completo'] ?? 'SIN NOMBRE',
-            'municipio'          => $datosFijos['municipio']       ?? null,
-            'seccion'            => $datosFijos['seccion']         ?? null,
-            'codigo_postal'      => $datosFijos['codigo_postal']   ?? null,
-            'latitud'            => isset($datosFijos['latitud'])  ? (float)$datosFijos['latitud']  : null,
-            'longitud'           => isset($datosFijos['longitud']) ? (float)$datosFijos['longitud'] : null,
-            'datos_generales'    => !empty($datosGenerales) ? json_encode($datosGenerales) : null,
+            // Truncamos preventivamente para evitar "Data too long for column" en MySQL
+            'nombre_completo'    => mb_substr($datosFijos['nombre_completo'] ?? 'SIN NOMBRE', 0, 255),
+            'municipio'          => mb_substr($datosFijos['municipio'] ?? null, 0, 255),
+            'seccion'            => mb_substr($datosFijos['seccion'] ?? null, 0, 255),
+            'codigo_postal'      => mb_substr($cp, 0, 10),
+            'latitud'            => $lat,
+            'longitud'           => $lng,
+            'datos_generales'    => !empty($datosGenerales) ? json_encode($datosGenerales, JSON_UNESCAPED_UNICODE) : null,
             'created_at'         => date('Y-m-d H:i:s'),
         ];
 
-        $registro['clave_unica'] = $datosFijos['clave_unica'] ?? md5($padronId . ($registro['nombre_completo']));
+        // Hash más seguro para evitar colisiones entre personas que se llamen igual
+        $seed = $padronId . $registro['nombre_completo'] . ($registro['datos_generales'] ?? '');
+        $registro['clave_unica'] = mb_substr($datosFijos['clave_unica'] ?? md5($seed), 0, 100);
 
         if (!$this->modeloDinamico->insert($registro)) {
             throw new \RuntimeException("Error al insertar registro.");
         }
 
+        // Invalidar caché solo si la inserción fue exitosa
         $this->invalidarCachePadron($padronId);
+        
         return $registro;
     }
 
     public function actualizarBeneficiario(string $padronId, string $beneficiarioId, array $datosFijos, array $datosGenerales = []): bool
     {
-        $padron = $this->obtenerPadronPorId($padronId);
+        $padron = $this->catalogoModel->find($padronId);
         if (!$padron) throw new \RuntimeException("Padrón no encontrado.");
 
         $this->modeloDinamico->setTable($padron->nombre_tabla_destino);
 
-        $updateData = array_filter([
-            'nombre_completo' => $datosFijos['nombre_completo'] ?? null,
-            'municipio'       => $datosFijos['municipio']       ?? null,
-            'codigo_postal'   => $datosFijos['codigo_postal']   ?? null,
-            'seccion'         => $datosFijos['seccion']         ?? null,
-            'latitud'         => isset($datosFijos['latitud'])  ? (float)$datosFijos['latitud']  : null,
-            'longitud'        => isset($datosFijos['longitud']) ? (float)$datosFijos['longitud'] : null,
-        ], fn($v) => !is_null($v));
+        $updateData = [];
 
-        if (!empty($datosGenerales)) {
-            $updateData['datos_generales'] = json_encode($datosGenerales);
+        // 🚀 Verificamos si la llave existe en el request, permitiendo NULLs intencionales
+        if (array_key_exists('nombre_completo', $datosFijos)) {
+            $updateData['nombre_completo'] = mb_substr($datosFijos['nombre_completo'], 0, 255);
+        }
+        if (array_key_exists('municipio', $datosFijos)) {
+            $updateData['municipio'] = mb_substr($datosFijos['municipio'], 0, 255);
+        }
+        if (array_key_exists('seccion', $datosFijos)) {
+            $updateData['seccion'] = mb_substr($datosFijos['seccion'], 0, 255);
+        }
+        if (array_key_exists('codigo_postal', $datosFijos)) {
+            $cp = preg_replace('/[^0-9A-Za-z]/', '', $datosFijos['codigo_postal']);
+            $updateData['codigo_postal'] = mb_substr($cp, 0, 10);
+        }
+        if (array_key_exists('latitud', $datosFijos)) {
+            $updateData['latitud'] = ($datosFijos['latitud'] === '' || $datosFijos['latitud'] === null) ? null : (float)$datosFijos['latitud'];
+        }
+        if (array_key_exists('longitud', $datosFijos)) {
+            $updateData['longitud'] = ($datosFijos['longitud'] === '' || $datosFijos['longitud'] === null) ? null : (float)$datosFijos['longitud'];
         }
 
-        $this->invalidarCachePadron($padronId);
-        return $this->modeloDinamico->update($beneficiarioId, $updateData);
-    }
+        if (!empty($datosGenerales)) {
+            $updateData['datos_generales'] = json_encode($datosGenerales, JSON_UNESCAPED_UNICODE);
+        }
 
+        // Ejecutamos el update
+        $exito = $this->modeloDinamico->update($beneficiarioId, $updateData);
+
+        // Invalidar caché solo si el update se completó bien
+        if ($exito) {
+            $this->invalidarCachePadron($padronId);
+        }
+
+        return $exito;
+    }
     public function eliminarBeneficiario(string $padronId, string $beneficiarioId): bool
     {
         $padron = $this->obtenerPadronPorId($padronId);
@@ -724,12 +771,16 @@ class PadronService implements PadronServiceInterface
     // BÚSQUEDA POR CÓDIGO POSTAL
     // =========================================================
 
-    public function buscarPorCodigoPostal(string $idPadron, string $cp, int $limit = 1000): array
+  public function buscarPorCodigoPostal(string $idPadron, string $cp, int $limit = 1000): array
     {
         $padron = $this->catalogoModel->find($idPadron);
         if (!$padron) throw new \RuntimeException("El padrón con ID {$idPadron} no existe.");
 
-        $cacheKey = "search_cp_{$idPadron}_{$cp}";
+        // Limpiamos el CP al extremo para evitar inyecciones y unificar la caché
+        $cpLimpio = preg_replace('/[^0-9A-Za-z]/', '', $cp);
+        if ($cpLimpio === '') return [];
+
+        $cacheKey = "search_cp_{$idPadron}_{$cpLimpio}";
         $cached   = $this->cache->get($cacheKey);
         if ($cached !== null) return $cached;
 
@@ -737,7 +788,7 @@ class PadronService implements PadronServiceInterface
 
         $resultado = $this->modeloDinamico
             ->select('id, clave_unica, nombre_completo, municipio, codigo_postal, seccion, latitud, longitud, datos_generales')
-            ->where('codigo_postal', trim($cp))
+            ->where('codigo_postal', $cpLimpio) // Búsqueda exacta ultra rápida
             ->orderBy('nombre_completo', 'ASC')
             ->findAll($limit);
 
@@ -747,43 +798,50 @@ class PadronService implements PadronServiceInterface
         return $resultado;
     }
 
-    // =========================================================
-    // PLANTILLA DE CAMPOS (datos_generales)
-    // =========================================================
-
-    // Una versión más "blindada" de tu lógica:
     public function obtenerPlantillaCampos(string $id): array
     {
         $padron = $this->catalogoModel->find($id);
-        if (!$padron) throw new RuntimeException("Padrón no encontrado");
+        if (!$padron) throw new \RuntimeException("Padrón no encontrado");
+
+
+        $cacheKey = "plantilla_{$id}";
+        $cached   = $this->cache->get($cacheKey);
+        if ($cached !== null) return $cached;
 
         $this->modeloDinamico->setTable($padron->nombre_tabla_destino);
 
-        // Tomamos los últimos 10 para asegurar que pescamos una estructura completa
+        // Tomamos los últimos 10 usando created_at en lugar de ID (el ID UUID string es más lento para ordenar)
         $muestras = $this->modeloDinamico
             ->where('datos_generales IS NOT NULL')
-            ->orderBy('id', 'DESC')
+            ->orderBy('created_at', 'DESC')
             ->findAll(10);
 
-        if (empty($muestras)) return [];
-
-        $todasLasLlaves = [];
-        foreach ($muestras as $m) {
-            $json = json_decode($m['datos_generales'], true);
-            if (is_array($json)) {
-                $todasLasLlaves = array_merge($todasLasLlaves, $json);
-            }
-        }
-
-        // Limpiamos los valores para que regresen vacíos
         $plantilla = [];
-        $camposFijos = ['id', 'catalogo_padron_id', 'clave_unica', 'nombre_completo', 'municipio', 'codigo_postal', 'seccion', 'latitud', 'longitud', 'datos_generales', 'estatus_duplicidad', 'created_at'];
+        
+        if (!empty($muestras)) {
+            $camposFijos = [
+                'id', 'catalogo_padron_id', 'clave_unica', 'nombre_completo', 
+                'municipio', 'codigo_postal', 'seccion', 'latitud', 'longitud', 
+                'datos_generales', 'estatus_duplicidad', 'created_at', 'geo_point'
+            ];
 
-        foreach ($todasLasLlaves as $llave => $valor) {
-            if (!in_array(strtolower($llave), $camposFijos)) {
-                $plantilla[$llave] = '';
+            foreach ($muestras as $m) {
+                $json = json_decode($m['datos_generales'], true);
+                if (is_array($json)) {
+                    // Solo iteramos las llaves, es mucho más rápido y gasta menos RAM que array_merge
+                    foreach (array_keys($json) as $llave) {
+                        $llaveLower = strtolower($llave);
+                        if (!in_array($llaveLower, $camposFijos, true)) {
+                            $plantilla[$llave] = '';
+                        }
+                    }
+                }
             }
         }
+
+        // Guardamos la plantilla en caché por mucho tiempo (ej. 24 horas)
+        $this->cache->save($cacheKey, $plantilla, 86400);
+        $this->registrarClaveCache($id, $cacheKey);
 
         return $plantilla;
     }

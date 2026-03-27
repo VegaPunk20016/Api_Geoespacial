@@ -3,6 +3,7 @@
 namespace Modules\Padrones\Services;
 
 use RuntimeException;
+use XMLReader;
 
 class FileConverterService
 {
@@ -30,7 +31,7 @@ class FileConverterService
         return $this->xlsxACsvNativo($ruta);
     }
 
-    // ================== PhpSpreadsheet ==================
+    // ================== PhpSpreadsheet (Para archivos pequeños/complejos) ==================
     private function xlsxACsvConPhpSpreadsheet(string $ruta): string
     {
         $reader = \PhpOffice\PhpSpreadsheet\IOFactory::createReaderForFile($ruta);
@@ -88,97 +89,132 @@ class FileConverterService
         return $destino;
     }
 
-    // ================== Fallback Nativo ==================
+    // ================== Fallback Nativo (Streaming XMLReader para archivos GIGANTES) ==================
     private function xlsxACsvNativo(string $ruta): string
     {
         $zip = new \ZipArchive();
         if ($zip->open($ruta) !== true) {
-            throw new RuntimeException("No se pudo abrir el XLSX.");
+            throw new RuntimeException("No se pudo abrir el archivo XLSX como ZIP.");
         }
 
+        // 1. EXTRAER TEXTOS COMPARTIDOS USANDO XMLREADER (Streaming para no reventar la RAM)
         $sharedStrings = [];
-        $ssXml = $zip->getFromName('xl/sharedStrings.xml');
-
-        if ($ssXml) {
-            $ss = new \SimpleXMLElement($ssXml);
-            foreach ($ss->si as $si) {
-                $texto = '';
-                if (isset($si->t)) {
-                    $texto = (string)$si->t;
-                } elseif (isset($si->r)) {
-                    foreach ($si->r as $r) {
-                        $texto .= (string)$r->t;
+        $streamShared = $zip->getStream('xl/sharedStrings.xml');
+        
+        if ($streamShared !== false) {
+            $xmlReader = new XMLReader();
+            
+            // Un pequeño truco para pasar el stream de ZipArchive a XMLReader
+            $tempDict = tempnam(sys_get_temp_dir(), 'ss_');
+            file_put_contents($tempDict, stream_get_contents($streamShared));
+            fclose($streamShared);
+            
+            $xmlReader->open($tempDict);
+            
+            while ($xmlReader->read()) {
+                if ($xmlReader->nodeType == XMLReader::ELEMENT && $xmlReader->name === 'si') {
+                    // Extraer contenido interno del nodo 'si' (SimpleXMLElement está bien aquí porque el nodo es minúsculo)
+                    $nodeXml = $xmlReader->readOuterXml();
+                    if ($nodeXml) {
+                        $si = new \SimpleXMLElement($nodeXml);
+                        $texto = '';
+                        if (isset($si->t)) {
+                            $texto = (string)$si->t;
+                        } elseif (isset($si->r)) {
+                            foreach ($si->r as $r) {
+                                $texto .= (string)$r->t;
+                            }
+                        }
+                        $sharedStrings[] = $texto;
                     }
                 }
-                $sharedStrings[] = $texto;
             }
+            $xmlReader->close();
+            @unlink($tempDict);
         }
 
-        $sheetXml = $zip->getFromName('xl/worksheets/sheet1.xml')
-            ?: $zip->getFromName('xl/worksheets/sheet2.xml');
+        // 2. EXTRAER HOJA DE DATOS
+        $sheetEntryName = 'xl/worksheets/sheet1.xml';
+        if ($zip->locateName('xl/worksheets/sheet2.xml') !== false && $zip->locateName($sheetEntryName) === false) {
+            $sheetEntryName = 'xl/worksheets/sheet2.xml';
+        }
 
+        $streamSheet = $zip->getStream($sheetEntryName);
+        if ($streamSheet === false) {
+            $zip->close();
+            throw new RuntimeException("No se encontró la hoja de datos principal (sheet1.xml) dentro del XLSX.");
+        }
+
+        $tempSheet = tempnam(sys_get_temp_dir(), 'sheet_');
+        file_put_contents($tempSheet, stream_get_contents($streamSheet));
+        fclose($streamSheet);
         $zip->close();
 
-        $xml = new \SimpleXMLElement($sheetXml);
-        $filas = [];
-
-        foreach ($xml->sheetData->row as $row) {
-            $rowIdx = (int)$row['r'];
-            $filaArr = [];
-            $maxCol = 0;
-
-            foreach ($row->c as $cell) {
-                $colIdx = $this->colLetraAIndice((string)$cell['r']) - 1;
-                $valXml = isset($cell->v) ? (string)$cell->v : '';
-                $tipo = (string)$cell['t'];
-
-                $valor = ($tipo === 's')
-                    ? ($sharedStrings[(int)$valXml] ?? '')
-                    : $valXml;
-
-                $filaArr[$colIdx] = str_replace(["\r", "\n"], " ", trim((string)$valor));
-
-                if ($colIdx > $maxCol) $maxCol = $colIdx;
-            }
-
-            $filaCompleta = [];
-            for ($c = 0; $c <= $maxCol; $c++) {
-                $filaCompleta[] = $filaArr[$c] ?? '';
-            }
-
-            $filas[$rowIdx] = $filaCompleta;
-        }
-
-        ksort($filas);
-
-        $primeraFila = null;
-        foreach ($filas as $idx => $fila) {
-            if (!$this->filaEstaVacia($fila)) {
-                $primeraFila = $idx;
-                break;
-            }
-        }
-
-        if ($primeraFila === null) {
-            throw new RuntimeException("Archivo sin datos.");
-        }
-
-        $headers = $this->hacerHeadersUnicos($filas[$primeraFila]);
-
+        // 3. PROCESAR HOJA DE DATOS CON STREAMING Y ESCRIBIR AL CSV INMEDIATAMENTE
         $destino = sys_get_temp_dir() . '/padron_' . uniqid() . '.csv';
         $handle = fopen($destino, 'w');
 
-        fputcsv($handle, $headers);
+        $xmlReader = new XMLReader();
+        $xmlReader->open($tempSheet);
 
-        foreach ($filas as $idx => $fila) {
-            if ($idx <= $primeraFila) continue;
-            if ($this->filaEstaVacia($fila)) continue;
-            if ($this->esFilaBasura($fila)) continue;
+        $headersDetectados = false;
+        $maxColGlobal = 0;
 
-            fputcsv($handle, $fila);
+        while ($xmlReader->read()) {
+            if ($xmlReader->nodeType == XMLReader::ELEMENT && $xmlReader->name === 'row') {
+                $nodeXml = $xmlReader->readOuterXml();
+                if (!$nodeXml) continue;
+                
+                $row = new \SimpleXMLElement($nodeXml);
+                
+                $filaArr = [];
+                $maxCol = 0;
+
+                foreach ($row->c as $cell) {
+                    $colRef = (string)$cell['r'];
+                    // Si no tiene referencia (r), asumimos que es secuencial, pero en XLSX siempre deberían tenerla.
+                    $colIdx = $colRef ? $this->colLetraAIndice($colRef) - 1 : count($filaArr);
+                    
+                    $valXml = isset($cell->v) ? (string)$cell->v : '';
+                    $tipo = (string)$cell['t'];
+
+                    $valor = ($tipo === 's')
+                        ? ($sharedStrings[(int)$valXml] ?? '')
+                        : $valXml;
+
+                    $filaArr[$colIdx] = str_replace(["\r", "\n"], " ", trim((string)$valor));
+                    if ($colIdx > $maxCol) $maxCol = $colIdx;
+                }
+
+                if ($maxCol > $maxColGlobal) $maxColGlobal = $maxCol;
+
+                // Construir arreglo completo con índices vacíos donde no haya celda
+                $filaCompleta = [];
+                for ($c = 0; $c <= $maxColGlobal; $c++) {
+                    $filaCompleta[] = $filaArr[$c] ?? '';
+                }
+
+                if ($this->filaEstaVacia($filaCompleta)) continue;
+                if ($this->esFilaBasura($filaCompleta)) continue;
+
+                // Si es la primera fila válida, la tratamos como headers
+                if (!$headersDetectados) {
+                    $headers = $this->hacerHeadersUnicos($filaCompleta);
+                    fputcsv($handle, $headers, ",", "\"", "\\");
+                    $headersDetectados = true;
+                } else {
+                    fputcsv($handle, $filaCompleta, ",", "\"", "\\");
+                }
+            }
         }
 
+        $xmlReader->close();
         fclose($handle);
+        @unlink($tempSheet);
+
+        if (!$headersDetectados) {
+            throw new RuntimeException("El archivo Excel no contenía filas con datos válidos.");
+        }
 
         return $destino;
     }
@@ -289,6 +325,7 @@ class FileConverterService
 
     private function colLetraAIndice(string $ref): int
     {
+        // Limpiamos los números para quedarnos solo con las letras de la columna (ej: "AB12" -> "AB")
         preg_match('/^([A-Z]+)/i', $ref, $m);
         $letters = strtoupper($m[1] ?? 'A');
 

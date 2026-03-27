@@ -7,8 +7,17 @@ use Ramsey\Uuid\Uuid;
 class PadronMapperService
 {
     // =========================
-    // CAMPOS FIJOS
+    // CAMPOS FIJOS Y LÍMITES
     // =========================
+    // Definimos los límites exactos de la BD para evitar "Data too long for column"
+    private array $limites = [
+        'clave_unica'     => 100,
+        'nombre_completo' => 255,
+        'municipio'       => 255,
+        'codigo_postal'   => 10,
+        'seccion'         => 255
+    ];
+
     private array $camposFijos = [
         'clave_unica',
         'nombre_completo',
@@ -59,9 +68,7 @@ class PadronMapperService
                 $esFijo = true;
 
             } elseif (preg_match($this->reNombre, $col)) {
-                if ($registro['nombre_completo'] === 'SIN NOMBRE') {
-                    $registro['nombre_completo'] = $val;
-                }
+                $partes['n'] = $val; // <-- CORREGIDO: Guarda la parte del nombre
                 $esFijo = true;
 
             } elseif (preg_match($this->rePaterno, $col)) {
@@ -74,7 +81,8 @@ class PadronMapperService
                 $registro['municipio'] = $val; $esFijo = true;
 
             } elseif (preg_match($this->reCP, $col)) {
-                $registro['codigo_postal'] = $val; $esFijo = true;
+                $registro['codigo_postal'] = preg_replace('/[^0-9A-Za-z]/', '', $val); // <-- Limpieza de CP
+                $esFijo = true;
 
             } elseif (preg_match($this->reSeccion, $col)) {
                 $registro['seccion'] = $val; $esFijo = true;
@@ -91,26 +99,28 @@ class PadronMapperService
             }
         }
 
-        // Clave única
+        // Nombre compuesto (ahora funciona perfecto)
+        $nombre = trim(preg_replace('/\s+/', ' ', "{$partes['n']} {$partes['p']} {$partes['m']}"));
+        if ($nombre !== '') {
+            $registro['nombre_completo'] = $nombre;
+        } elseif (!empty($registro['municipio']) && $registro['nombre_completo'] === 'SIN NOMBRE') {
+            $registro['nombre_completo'] = 'REGISTRO ' . mb_strtoupper($registro['municipio']);
+        }
+
+        // Clave única más robusta (incluye nombre para evitar colisiones)
         if ($claveDetectada) {
             $registro['clave_unica'] = $claveDetectada;
         } else {
             ksort($extra);
-            $registro['clave_unica'] = md5($uuid . json_encode($extra));
+            $seed = $uuid . $registro['nombre_completo'] . json_encode($extra);
+            $registro['clave_unica'] = md5($seed);
             $registro['estatus_duplicidad'] = 'generado_por_sistema';
         }
 
-        // Nombre compuesto
-        if ($registro['nombre_completo'] === 'SIN NOMBRE') {
-            $nombre = trim("{$partes['p']} {$partes['m']} {$partes['n']}");
-            if ($nombre !== '') {
-                $registro['nombre_completo'] = $nombre;
-            } elseif (!empty($registro['municipio'])) {
-                $registro['nombre_completo'] = $registro['municipio'];
-            }
-        }
-
         $registro['datos_generales'] = $this->json($extra);
+        
+        // Truncar para evitar crasheos en BD
+        $this->truncarLimitesSeguros($registro);
 
         return $registro;
     }
@@ -122,6 +132,7 @@ class PadronMapperService
     {
         $registro = $this->base($uuid);
         $extra = [];
+        $claveDetectada = null;
 
         foreach ($fila as $col => $val) {
 
@@ -134,8 +145,13 @@ class PadronMapperService
 
                 if ($destino === 'latitud' || $destino === 'longitud') {
                     $registro[$destino] = $this->toFloat($val);
+                } elseif ($destino === 'codigo_postal') {
+                    $registro[$destino] = preg_replace('/[^0-9A-Za-z]/', '', $val);
                 } else {
-                    $registro[$destino] = mb_substr($val, 0, 255);
+                    $registro[$destino] = $val;
+                    if ($destino === 'clave_unica') {
+                        $claveDetectada = $val;
+                    }
                 }
 
             } else {
@@ -143,13 +159,19 @@ class PadronMapperService
             }
         }
 
-        if (empty($registro['clave_unica'])) {
+        if ($claveDetectada) {
+            $registro['clave_unica'] = $claveDetectada;
+        } elseif (empty($registro['clave_unica'])) {
             ksort($extra);
-            $registro['clave_unica'] = md5($uuid . json_encode($extra));
+            $seed = $uuid . $registro['nombre_completo'] . json_encode($extra);
+            $registro['clave_unica'] = md5($seed);
             $registro['estatus_duplicidad'] = 'generado_por_sistema';
         }
 
         $registro['datos_generales'] = $this->json($extra);
+        
+        // Truncar para evitar crasheos en BD
+        $this->truncarLimitesSeguros($registro);
 
         return $registro;
     }
@@ -175,6 +197,15 @@ class PadronMapperService
         ];
     }
 
+    private function truncarLimitesSeguros(array &$registro): void
+    {
+        foreach ($this->limites as $campo => $maxLength) {
+            if (!empty($registro[$campo])) {
+                $registro[$campo] = mb_substr((string)$registro[$campo], 0, $maxLength, 'UTF-8');
+            }
+        }
+    }
+
     private function limpiarValor($v): string
     {
         $v = mb_convert_encoding((string)$v, 'UTF-8', 'UTF-8, ISO-8859-1');
@@ -197,14 +228,18 @@ class PadronMapperService
 
     private function toFloat($v): ?float
     {
-        $v = (float)str_replace(',', '.', $v);
-        return ($v != 0) ? $v : null;
+        // Limpiamos todo lo que no sea número, punto o signo negativo (vital para el índice espacial)
+        $v = preg_replace('/[^0-9\.\-]/', '', str_replace(',', '.', (string)$v));
+        if ($v === '' || $v === '.') return null;
+
+        $floatVal = (float)$v;
+        return ($floatVal != 0) ? $floatVal : null;
     }
 
     private function json(array $data): ?string
     {
         return !empty($data)
-            ? json_encode($data, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE)
+            ? json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE)
             : null;
     }
 }

@@ -4,7 +4,7 @@ namespace Modules\Padrones\Services;
 
 use CodeIgniter\Database\ConnectionInterface;
 use RuntimeException;
-use Exception;
+use Throwable;
 
 class PadronImportService
 {
@@ -26,8 +26,6 @@ class PadronImportService
         set_time_limit(0);
         ini_set('memory_limit', '2048M');
 
-        $this->optimizarMysql();
-
         if (!file_exists($rutaArchivo)) {
             throw new RuntimeException("Archivo no encontrado");
         }
@@ -36,13 +34,20 @@ class PadronImportService
         if (!$handle) throw new RuntimeException("No se pudo abrir archivo");
 
         $headers = $this->detectarHeaders($handle);
-        if (!$headers) throw new RuntimeException("Sin headers válidos");
+        if (!$headers) {
+            fclose($handle);
+            throw new RuntimeException("Sin headers válidos");
+        }
 
         $numHeaders = count($headers);
         $builder = $this->db->table($tabla);
 
         $batch = [];
-        $resumen = ['procesados'=>0,'omitidos'=>0,'errores'=>0];
+        $resumen = ['procesados' => 0, 'omitidos' => 0, 'errores' => 0];
+
+        // 🛡️ BLOQUEO DE SEGURIDAD: Preparamos la BD para inserción masiva
+        $this->optimizarMysql();
+        $this->db->query("START TRANSACTION");
 
         try {
             while (($fila = fgetcsv($handle, 0, ',', '"', '\\')) !== false) {
@@ -71,19 +76,23 @@ class PadronImportService
                 }
             }
 
-            if ($batch) $this->insertBatchSeguro($builder, $batch);
+            // Insertamos el remanente
+            if (!empty($batch)) {
+                $this->insertBatchSeguro($builder, $batch);
+            }
 
             $this->db->query("COMMIT");
 
-        } catch (Exception $e) {
+        } catch (Throwable $e) {
             $this->db->query("ROLLBACK");
-            fclose($handle);
+            throw new RuntimeException("Error durante la importación: " . $e->getMessage());
+        } finally {
+            // 🛡️ FINALLY: Pase lo que pase (éxito o error fatal), SIEMPRE restauramos la BD y cerramos el archivo
+            if (is_resource($handle)) {
+                fclose($handle);
+            }
             $this->restaurarMysql();
-            throw new RuntimeException($e->getMessage());
         }
-
-        fclose($handle);
-        $this->restaurarMysql();
 
         return $resumen;
     }
@@ -94,42 +103,43 @@ class PadronImportService
     public function importarConMapeo(string $tabla, string $uuid, string $ruta, array $mapeo, array $filasIgnoradas = []): array
     {
         set_time_limit(0);
-        $this->optimizarMysql();
+        ini_set('memory_limit', '2048M');
 
         $handle = fopen($ruta, 'r');
         if (!$handle) throw new RuntimeException("No se pudo abrir archivo");
 
-        // detectarHeaders ya hace un rewind y salta la fila de encabezados
         $headers = $this->detectarHeaders($handle);
-        if (!$headers) throw new RuntimeException("Sin headers");
+        if (!$headers) {
+            fclose($handle);
+            throw new RuntimeException("Sin headers");
+        }
 
         $numHeaders = count($headers);
         $builder = $this->db->table($tabla);
 
         $batch = [];
         $resumen = ['procesados' => 0, 'omitidos' => 0];
-        
-        // Este índice debe coincidir exactamente con el 'ri' (row index) de tu v-for en Vue
         $indiceFilaFisica = 0; 
+
+        // 🛡️ BLOQUEO DE SEGURIDAD
+        $this->optimizarMysql();
+        $this->db->query("START TRANSACTION");
 
         try {
             while (($fila = fgetcsv($handle, 0, ',', '"', '\\')) !== false) {
                 
-
                 if (in_array($indiceFilaFisica, $filasIgnoradas)) {
                     $resumen['omitidos']++;
                     $indiceFilaFisica++; 
                     continue;           
                 }
 
-                // 2. ¿La fila está vacía en el CSV?
                 if ($this->filaVacia($fila)) {
                     $resumen['omitidos']++;
                     $indiceFilaFisica++; 
                     continue;
                 }
 
-                // Si llegamos aquí, la fila es válida para procesar
                 $indiceFilaFisica++;
 
                 $fila = $this->alinearFila($fila, $numHeaders);
@@ -155,18 +165,22 @@ class PadronImportService
                 }
             }
 
-            if ($batch) $this->insertBatchSeguro($builder, $batch);
+            if (!empty($batch)) {
+                $this->insertBatchSeguro($builder, $batch);
+            }
+            
             $this->db->query("COMMIT");
 
-        } catch (Exception $e) {
+        } catch (Throwable $e) {
             $this->db->query("ROLLBACK");
-            fclose($handle);
+            throw new RuntimeException("Error durante la importación manual: " . $e->getMessage());
+        } finally {
+            // 🛡️ FINALLY
+            if (is_resource($handle)) {
+                fclose($handle);
+            }
             $this->restaurarMysql();
-            throw new RuntimeException($e->getMessage());
         }
-
-        fclose($handle);
-        $this->restaurarMysql();
 
         return $resumen;
     }
@@ -224,13 +238,10 @@ class PadronImportService
 
     private function insertBatchSeguro($builder, array $datos): void
     {
-        $this->db->transStart();
+        // 🚀 Eliminamos transStart/transComplete de aquí.
+        // Al usar START TRANSACTION arriba, delegamos el control al bloque Try/Catch principal.
+        // Esto evita "Commits" fantasma causados por transacciones anidadas.
         $builder->insertBatch($datos);
-        $this->db->transComplete();
-
-        if (!$this->db->transStatus()) {
-            throw new RuntimeException("Error en insertBatch");
-        }
     }
 
     private function hacerHeadersUnicos(array $headers): array
@@ -239,7 +250,7 @@ class PadronImportService
         $count = [];
 
         foreach ($headers as $h) {
-            $h = trim($h) ?: 'columna';
+            $h = trim((string)$h) ?: 'columna';
             if (isset($count[$h])) {
                 $count[$h]++;
                 $out[] = "{$h}_{$count[$h]}";
