@@ -31,4 +31,6 @@ interface PadronServiceInterface
     public function guardarBeneficiario(string $padronId, array $datosFijos, array $datosGenerales = []): array;
     public function actualizarBeneficiario(string $padronId, string $beneficiarioId, array $datosFijos, array $datosGenerales = []): bool;
     public function eliminarBeneficiario(string $padronId, string $beneficiarioId): bool;
+    public function generarArchivoCsvExportacion(string $id): string;
+    public function buscarGlobal(string $idPadron, string $termino, int $pagina = 1, int $limit = 50): array;
 }

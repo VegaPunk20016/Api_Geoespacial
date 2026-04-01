@@ -28,7 +28,7 @@ class PadronController extends ResourceController
     public function index()
     {
         try {
-                $padrones = $this->padronService->obtenerTodosLosPadrones();
+            $padrones = $this->padronService->obtenerTodosLosPadrones();
             return $this->respond(['status' => 200, 'data' => $padrones]);
         } catch (Exception $e) {
             return $this->failServerError($e->getMessage());
@@ -366,7 +366,7 @@ class PadronController extends ResourceController
             if (!$archivo->isValid()) {
                 return $this->failValidationErrors(
                     'PHP bloqueó la carga. ' . $archivo->getErrorString() .
-                    ' (Código ' . $archivo->getError() . ')'
+                        ' (Código ' . $archivo->getError() . ')'
                 );
             }
 
@@ -427,12 +427,12 @@ class PadronController extends ResourceController
         }
     }
 
-   // ============================================================
+    // ============================================================
     // POST /api/padrones/{id}/importar-mapeado
     // Importa con el mapeo de columnas que define el usuario.
     // ============================================================
 
-  public function importarConMapeo($padronId = null)
+    public function importarConMapeo($padronId = null)
     {
         try {
             if (!$padronId) return $this->failValidationErrors('ID requerido.');
@@ -502,7 +502,73 @@ class PadronController extends ResourceController
             // Limpiamos el valor de forma recursiva
             $limpio[$llaveLimpia] = $this->limpiarArregloUTF8($value);
         }
-        
+
         return $limpio;
+    }
+    public function exportarTodos(string $id)
+    {
+        try {
+            set_time_limit(300);
+
+            $termino = $this->request->getGet('q');  // ← recibir query de búsqueda
+
+            $rutaArchivoTemporal = $this->padronService->generarArchivoCsvExportacion($id, $termino);
+
+            $origen = $this->request->getHeaderLine('Origin') ?: '*';
+            $respuestaDescarga = $this->response->download($rutaArchivoTemporal, null)->setFileName('Padron_Exportacion.csv');
+
+            return $respuestaDescarga
+                ->setHeader('Access-Control-Allow-Origin', $origen)
+                ->setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Requested-With')
+                ->setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS')
+                ->setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+        } catch (\Throwable $e) {
+            log_message('error', '[Exportar CSV] ' . $e->getMessage());
+            $origen = $this->request->getHeaderLine('Origin') ?: '*';
+            return $this->response
+                ->setStatusCode(500)
+                ->setHeader('Access-Control-Allow-Origin', $origen)
+                ->setJSON(['message' => 'Error al generar el CSV.']);
+        }
+    }
+
+    // ============================================================
+    // GET /api/padrones/{id}/buscar?q=termino
+    // Búsqueda global en toda la base de datos (Toda la tabla)
+    // ============================================================
+
+    // ============================================================
+    // GET /api/padrones/{id}/buscar-global?q=termino
+    // =php00000===================================================
+    public function buscarGlobal($id = null)
+    {
+        try {
+            if (!$id) return $this->failValidationErrors('ID requerido.');
+
+            $termino = $this->request->getGet('q');
+            $pagina  = (int)($this->request->getGet('pagina') ?? 1);
+            $limit   = (int)($this->request->getGet('por_pagina') ?? 100);
+
+            if (!$termino || strlen(trim($termino)) < 2) {
+                return $this->respond(['status' => 200, 'data' => [], 'total' => 0]);
+            }
+
+            // Llamamos al service
+            $res = $this->padronService->buscarGlobal($id, $termino, $pagina, $limit);
+
+            // Retornamos una estructura plana compatible con el Store de Vue
+            return $this->respond([
+                'status'     => 200,
+                'data'       => $res['data'], // Array directo de registros
+                'paginacion' => [
+                    'total'      => $res['total'],
+                    'pagina'     => $res['pagina'],
+                    'por_pagina' => $res['por_pagina'],
+                    'paginas'    => $res['paginas'],
+                ]
+            ]);
+        } catch (\Exception $e) {
+            return $this->failServerError($e->getMessage());
+        }
     }
 }

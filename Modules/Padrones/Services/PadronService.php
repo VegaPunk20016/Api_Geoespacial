@@ -12,6 +12,7 @@ use Modules\Padrones\Services\FileConverterService;
 use Ramsey\Uuid\Uuid;
 use CodeIgniter\Database\ConnectionInterface;
 use CodeIgniter\Cache\CacheInterface;
+use Error;
 use RuntimeException;
 
 class PadronService implements PadronServiceInterface
@@ -323,7 +324,7 @@ class PadronService implements PadronServiceInterface
     // Modo tabla → BBOX = false → paginación con pagina + por_pagina
     // =========================================================
 
-   public function obtenerBeneficiarios(string $id, array $filtros = []): array
+    public function obtenerBeneficiarios(string $id, array $filtros = []): array
     {
         $padron = $this->catalogoModel->find($id);
         if (!$padron) throw new \RuntimeException("El padrón solicitado no existe.");
@@ -344,7 +345,13 @@ class PadronService implements PadronServiceInterface
 
         $paginar   = !$tieneBbox && isset($filtros['pagina']);
         $pagina    = max(1, (int)($filtros['pagina'] ?? 1));
-        $porPagina = max(10, min(200, (int)($filtros['por_pagina'] ?? 50)));
+        $solicitado        = (int)($filtros['por_pagina'] ?? 50);
+        $tieneFiltroPuntual = !empty(trim($filtros['municipio'] ?? ''))
+            || !empty(trim($filtros['cp'] ?? ''))
+            || !empty(trim($filtros['codigo_postal'] ?? ''));
+        $porPagina = $tieneFiltroPuntual
+            ? max(10, min(self::LIMIT_PUNTOS, $solicitado))
+            : max(10, min(200, $solicitado));
         $offset    = ($pagina - 1) * $porPagina;
 
         // Construcción de llave de caché
@@ -555,7 +562,7 @@ class PadronService implements PadronServiceInterface
         if ($termino === '') return [];
 
         $tabla = $this->db->escapeIdentifier($padron->nombre_tabla_destino);
-        
+
         // Dejamos que MySQL maneje las mayúsculas/minúsculas naturalmente
         $like  = '%' . $termino . '%';
 
@@ -584,89 +591,105 @@ class PadronService implements PadronServiceInterface
 
         $tabla = $this->db->escapeIdentifier($padron->nombre_tabla_destino);
 
+        // Si no hay municipio, devolvemos totales del estado (Mapa de calor)
         if ($municipio === null) {
-            $cacheKey = "coropletas_{$id}";
-            $cached   = $this->cache->get($cacheKey);
-            if ($cached !== null) return $cached;
-
-            // Este bloque está excelente, es un escaneo necesario para colorear el mapa base
-            $resultado = $this->db->table($tabla)
-                ->select('municipio, COUNT(id) AS total', false)
-                ->select('SUM(latitud IS NOT NULL AND longitud IS NOT NULL) > 0 AS tiene_coordenadas', false)
-                ->select("SUM(seccion IS NOT NULL AND seccion != '') > 0 AS tiene_seccion", false)
-                ->where('municipio IS NOT NULL', null, false)
-                ->groupBy('municipio', false)
-                ->get()
-                ->getResultArray();
-
-            foreach ($resultado as &$row) {
-                $row['tiene_coordenadas'] = (bool)(int)$row['tiene_coordenadas'];
-                $row['tiene_seccion']     = (bool)(int)$row['tiene_seccion'];
-            }
-            unset($row);
-
-            $this->cache->save($cacheKey, $resultado, self::TTL_RESUMEN);
-            $this->registrarClaveCache($id, $cacheKey);
-
-            return $resultado;
+            return $this->_obtenerTotalesEstado($tabla, $id);
         }
 
-        // ==========================================
-        // OPTIMIZACIÓN PARA MUNICIPIO ESPECÍFICO
-        // ==========================================
-        $municipio = trim($municipio);
-        $cacheKey  = "resumen_{$id}_" . md5($municipio);
+        $municipioOriginal = trim($municipio);
+        $municipioBusqueda = trim(str_replace(['*', '/', ',', '#'], '', $municipioOriginal));
 
-        $cached = $this->cache->get($cacheKey);
-        if ($cached !== null) return $cached;
-
-        // 🚀 BÚSQUEDA EXACTA: Aprovechamos al máximo el índice idx_mun
-        $row = $this->db->table($tabla)
-            ->select('datos_generales')
-            ->where('municipio', $municipio) // <-- ¡ADIÓS UPPER(TRIM(LIKE))!
-            ->where('datos_generales IS NOT NULL', null, false)
+        // --- 1. OBTENER INFORMACIÓN DEL MUNICIPIO (LA "SÁBANA" DE DATOS) ---
+        // Buscamos un registro para extraer los datos_generales del municipio
+        $muestraMunicipio = $this->db->table($tabla)
+            ->select('nombre_completo, clave_unica, datos_generales')
+            ->like('municipio', $municipioBusqueda, 'both')
+            ->where('datos_generales IS NOT NULL')
             ->limit(1)
             ->get()
             ->getRowArray();
 
-        $camposSumables = [];
-        if ($row) {
-            $json = json_decode($row['datos_generales'], true);
-            if (is_array($json)) {
-                foreach ($json as $key => $val) {
-                    if (is_numeric($val)) $camposSumables[] = $key;
+        $detallesMunicipio = [];
+        $metaMunicipio = [
+            'nombre_muestra' => 'Información Municipal',
+            'clave_muestra'  => ''
+        ];
+
+        $excluir = ['uuid', 'estado', 'id_estado', 'id_municipio', 'latitud', 'longitud'];
+
+        if ($muestraMunicipio) {
+            $metaMunicipio['nombre_muestra'] = $muestraMunicipio['nombre_completo'] ?? 'Información Municipal';
+            $metaMunicipio['clave_muestra']  = $muestraMunicipio['clave_unica'] ?? '';
+
+            $jsonMun = json_decode($muestraMunicipio['datos_generales'], true);
+            if (is_array($jsonMun)) {
+                foreach ($jsonMun as $key => $val) {
+                    if (in_array(strtolower($key), $excluir)) continue;
+                    $detallesMunicipio[] = [
+                        'label' => str_replace('_', ' ', strtoupper($key)),
+                        'value' => (string)$val
+                    ];
                 }
             }
         }
 
-        $builder = $this->db->table($tabla)
-            ->select('COUNT(id) as total_registros', false)
-            ->where('municipio', $municipio); // <-- AQUÍ TAMBIÉN, BÚSQUEDA EXACTA
+        // --- 2. CONTEO TOTAL ---
+        $totalMunicipio = $this->db->table($tabla)
+            ->like('municipio', $municipioBusqueda, 'both')
+            ->countAllResults();
 
-        foreach ($camposSumables as $campo) {
-            $builder->selectSum(
-                "CAST(datos_generales->>'$.\"{$campo}\"' AS UNSIGNED)",
-                "sum_{$campo}"
-            );
+        // --- 3. DESGLOSE POR SECCIONES ---
+        $secciones = $this->db->table($tabla)
+            ->select('seccion, clave_unica, datos_generales, nombre_completo')
+            ->like('municipio', $municipioBusqueda, 'both')
+            ->where('seccion IS NOT NULL')
+            ->where("seccion != ''")
+            ->get()
+            ->getResultArray();
+
+        $registrosPorSeccion = [];
+        foreach ($secciones as $s) {
+            $jsonSec = json_decode($s['datos_generales'], true);
+            $detallesSec = [];
+
+            if (is_array($jsonSec)) {
+                foreach ($jsonSec as $key => $val) {
+                    if (in_array(strtolower($key), $excluir)) continue;
+                    $detallesSec[] = [
+                        'label' => str_replace('_', ' ', strtoupper($key)),
+                        'value' => (string)$val
+                    ];
+                }
+            }
+
+            $registrosPorSeccion[$s['seccion']] = [
+                'seccion'  => $s['seccion'],
+                'total'    => 1,
+                'detalles' => $detallesSec,
+                'meta'     => [
+                    'nombre' => $s['nombre_completo'],
+                    'clave'  => $s['clave_unica']
+                ]
+            ];
         }
 
-        $resultado = [
-            'municipio' => $municipio,
-            'stats'     => $builder->get()->getRowArray(),
-            'campos'    => $camposSumables,
+        // --- RESULTADO INTEGRADO ---
+        return [
+            'municipio'     => $municipioOriginal,
+            'total'         => $totalMunicipio,
+            'detalles'      => $detallesMunicipio, // <-- Esto es lo que te faltaba en el JSON
+            'meta'          => $metaMunicipio,     // <-- Esto también faltaba
+            'hay_secciones' => !empty($registrosPorSeccion),
+            'secciones'     => $registrosPorSeccion
         ];
-
-        $this->cache->save($cacheKey, $resultado, self::TTL_RESUMEN);
-        $this->registrarClaveCache($id, $cacheKey);
-
-        return $resultado;
     }
+
 
     // =========================================================
     // CRUD BENEFICIARIOS
     // =========================================================
 
-   public function guardarBeneficiario(string $padronId, array $datosFijos, array $datosGenerales = []): array
+    public function guardarBeneficiario(string $padronId, array $datosFijos, array $datosGenerales = []): array
     {
         $padron = $this->catalogoModel->find($padronId);
         if (!$padron) throw new \RuntimeException("Padrón no encontrado.");
@@ -704,7 +727,7 @@ class PadronService implements PadronServiceInterface
 
         // Invalidar caché solo si la inserción fue exitosa
         $this->invalidarCachePadron($padronId);
-        
+
         return $registro;
     }
 
@@ -771,7 +794,7 @@ class PadronService implements PadronServiceInterface
     // BÚSQUEDA POR CÓDIGO POSTAL
     // =========================================================
 
-  public function buscarPorCodigoPostal(string $idPadron, string $cp, int $limit = 1000): array
+    public function buscarPorCodigoPostal(string $idPadron, string $cp, int $limit = 1000): array
     {
         $padron = $this->catalogoModel->find($idPadron);
         if (!$padron) throw new \RuntimeException("El padrón con ID {$idPadron} no existe.");
@@ -817,12 +840,22 @@ class PadronService implements PadronServiceInterface
             ->findAll(10);
 
         $plantilla = [];
-        
+
         if (!empty($muestras)) {
             $camposFijos = [
-                'id', 'catalogo_padron_id', 'clave_unica', 'nombre_completo', 
-                'municipio', 'codigo_postal', 'seccion', 'latitud', 'longitud', 
-                'datos_generales', 'estatus_duplicidad', 'created_at', 'geo_point'
+                'id',
+                'catalogo_padron_id',
+                'clave_unica',
+                'nombre_completo',
+                'municipio',
+                'codigo_postal',
+                'seccion',
+                'latitud',
+                'longitud',
+                'datos_generales',
+                'estatus_duplicidad',
+                'created_at',
+                'geo_point'
             ];
 
             foreach ($muestras as $m) {
@@ -875,5 +908,155 @@ class PadronService implements PadronServiceInterface
         }
 
         $this->cache->delete($indexKey);
+    }
+
+
+    public function generarArchivoCsvExportacion(string $id, ?string $termino = null): string
+    {
+        $padron = $this->catalogoModel->find($id);
+        if (!$padron) throw new \RuntimeException("El padrón no existe.");
+
+        $this->modeloDinamico->setTable($padron->nombre_tabla_destino);
+
+        $tempFile = tempnam(sys_get_temp_dir(), 'export_padron_');
+        $outputStream = fopen($tempFile, 'w');
+        fwrite($outputStream, "\xEF\xBB\xBF");
+
+        $plantilla = $this->obtenerPlantillaCampos($id);
+        $llavesExtra = array_keys($plantilla);
+
+        $headers = ['CLAVE', 'NOMBRE', 'MUNICIPIO', 'CP', 'SECCION', 'LATITUD', 'LONGITUD'];
+        foreach ($llavesExtra as $col) {
+            $headers[] = strtoupper(str_replace('_', ' ', $col));
+        }
+        fputcsv($outputStream, $headers, ',', '"', '\\');
+
+        $limit  = 2000;
+        $offset = 0;
+
+        while (true) {
+            $builder = $this->modeloDinamico->builder()
+                ->select('clave_unica, nombre_completo, municipio, codigo_postal, seccion, latitud, longitud, datos_generales');
+
+            // ← Aplicar filtro si hay término de búsqueda
+            if (!empty($termino)) {
+                $builder
+                    ->groupStart()
+                    ->like('nombre_completo', $termino)
+                    ->orLike('clave_unica',   $termino)
+                    ->orLike('municipio',     $termino)
+                    ->orLike('codigo_postal', $termino)
+                    ->orLike('seccion',       $termino)
+                    ->groupEnd();
+            }
+
+            $resultados = $builder->limit($limit, $offset)->get()->getResultArray();
+
+            if (empty($resultados)) break;
+
+            foreach ($resultados as $row) {
+                $filaCsv = [
+                    $row['clave_unica']      ?? '',
+                    $row['nombre_completo']  ?? '',
+                    $row['municipio']        ?? '',
+                    $row['codigo_postal']    ?? '',
+                    $row['seccion']          ?? '',
+                    $row['latitud']          ?? '',
+                    $row['longitud']         ?? '',
+                ];
+
+                $extra = [];
+                if (!empty($row['datos_generales'])) {
+                    $extra = json_decode($row['datos_generales'], true) ?: [];
+                }
+
+                foreach ($llavesExtra as $llave) {
+                    $val = $extra[$llave] ?? $extra[strtolower($llave)] ?? '';
+                    $filaCsv[] = str_replace(["\r", "\n"], " ", (string)$val);
+                }
+
+                fputcsv($outputStream, $filaCsv, ',', '"', '\\');
+            }
+
+            $offset += $limit;
+        }
+
+        fclose($outputStream);
+        return $tempFile;
+    }
+
+    public function buscarGlobal(string $idPadron, string $termino, int $pagina = 1, int $limit = 50): array
+    {
+        $padron = $this->catalogoModel->find($idPadron);
+        if (!$padron) throw new \RuntimeException("Padrón no encontrado.");
+
+        $termino = trim($termino);
+        if (empty($termino)) return ['data' => [], 'total' => 0, 'pagina' => 1, 'paginas' => 0];
+
+        $this->modeloDinamico->setTable($padron->nombre_tabla_destino);
+
+        // 1. Construir Query Base
+        $builder = $this->modeloDinamico->builder()
+            ->select('id, clave_unica, nombre_completo, municipio, codigo_postal, seccion, latitud, longitud, datos_generales')
+            ->groupStart()
+            ->like('nombre_completo', $termino)
+            ->orLike('clave_unica', $termino)
+            ->orLike('municipio', $termino)
+            ->orLike('codigo_postal', $termino)
+            ->orLike('seccion', $termino)
+            ->groupEnd();
+
+        // 2. Contar el total de coincidencias antes de limitar
+        $totalRegistros = (clone $builder)->countAllResults();
+
+        // 3. Aplicar Paginación
+        $offset = ($pagina - 1) * $limit;
+        $resultado = $builder->limit($limit, $offset)->get()->getResultArray();
+
+        // 4. Retornar estructura limpia (Plana)
+        return [
+            'data'       => $resultado,
+            'total'      => $totalRegistros,
+            'pagina'     => (int)$pagina,
+            'por_pagina' => (int)$limit,
+            'paginas'    => (int)ceil($totalRegistros / $limit)
+        ];
+    }
+
+    private function _obtenerTotalesEstado(string $tabla, string $idPadron): array
+    {
+        $cacheKey = "coropletas_v3_{$idPadron}";
+        $cached   = $this->cache->get($cacheKey);
+        if ($cached !== null) return $cached;
+
+        $resultado = $this->db->table($tabla)
+            ->select('municipio, COUNT(id) AS total', false)
+            ->select('SUM(latitud IS NOT NULL AND longitud IS NOT NULL) > 0 AS tiene_coordenadas', false)
+            ->where('municipio IS NOT NULL', null, false)
+            ->groupBy('municipio', false)
+            ->get()
+            ->getResultArray();
+
+        foreach ($resultado as &$row) {
+            // Generamos la match_key para el MapView.vue
+            $row['match_key']         = $this->_normalizarParaMatch($row['municipio'] ?? '');
+            $row['total']             = (int)$row['total'];
+            $row['tiene_coordenadas'] = (bool)(int)$row['tiene_coordenadas'];
+        }
+
+        $this->cache->save($cacheKey, $resultado, 3600);
+        return $resultado;
+    }
+    private function _normalizarParaMatch(string $str): string
+    {
+        $str = strtr(
+            utf8_decode($str),
+            utf8_decode('àáâãäçèéêëìíîïñòóôõöùúûüýÿÀÁÂÃÄÇÈÉÊËÌÍÎÏÑÒÓÔÕÖÙÚÛÜÝ'),
+            'aaaaaceeeeiiiinooooouuuuyyAAAAACEEEEIIIINOOOOOUUUUY'
+        );
+
+        $str = strtolower($str);
+        // Elimina espacios y cualquier símbolo especial para que el match sea perfecto
+        return preg_replace('/[^a-z0-9]/', '', $str);
     }
 }

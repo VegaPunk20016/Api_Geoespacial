@@ -15,9 +15,11 @@ $routes->group('api/padrones', ['namespace' => 'Modules\Padrones\Controllers', '
     $routes->get('(:segment)/beneficiarios',                 'PadronController::getBeneficiarios/$1');
     $routes->get('(:segment)/clusters',                      'PadronController::getClusters/$1');
     $routes->get('(:segment)/buscar',                        'PadronController::buscar/$1');
+    $routes->get('(:segment)/buscar-global', 'PadronController::buscarGlobal/$1');
     $routes->get('(:segment)/resumen',                       'PadronController::getResumen/$1');
     $routes->get('(:segment)/plantilla',                     'PadronController::getPlantilla/$1');
     $routes->get('(:segment)',                               'PadronController::show/$1');
+    $routes->get('(:segment)/exportar', 'PadronController::exportarTodos/$1');
 
     // ── Solo admin y super_admin ──────────────────────────────────────────────
     $routes->group('', ['filter' => 'role:super_admin,admin'], function ($routes) {
